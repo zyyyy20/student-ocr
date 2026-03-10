@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+import re
+import uuid
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+from fastapi import HTTPException
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
+
+
+class ExcelService:
+    """
+    使用 openpyxl 生成导出 Excel。
+    """
+
+    def __init__(self, *, export_dir: Path) -> None:
+        self.export_dir = export_dir
+        self.export_dir.mkdir(parents=True, exist_ok=True)
+
+    def export_transcript(self, payload: Dict[str, Any]) -> str:
+        """
+        输入：前端修改后的成绩 JSON（{"headers": [...], "rows": [...]}）
+        输出：生成 Excel 文件名（用于拼接静态下载链接）
+        """
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="导出数据格式错误：payload 必须为 JSON 对象")
+
+        headers = payload.get("headers") or []
+        rows = payload.get("rows") or []
+        
+        if not isinstance(headers, list) or not isinstance(rows, list):
+            raise HTTPException(status_code=400, detail="导出数据格式错误：headers/rows 结构不正确")
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "班级成绩单"
+
+        bold = Font(bold=True)
+        
+        # 1. 写入表头
+        for col_idx, header in enumerate(headers, start=1):
+            cell = ws.cell(row=1, column=col_idx, value=str(header))
+            cell.font = bold
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+            # 简单设置列宽
+            ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 15
+
+        # 2. 写入数据行
+        for row_idx, row_item in enumerate(rows, start=2):
+            # row_item 可能是 {"values": {...}, "confidences": {...}}
+            values = row_item.get("values", {})
+            if not isinstance(values, dict):
+                continue
+                
+            for col_idx, header in enumerate(headers, start=1):
+                val = values.get(header, "")
+                # 尝试转数字以便 Excel 统计
+                num_val = self._parse_score(val)
+                final_val = num_val if num_val is not None else val
+                
+                ws.cell(row=row_idx, column=col_idx, value=final_val)
+
+        filename = f"class_transcript_{uuid.uuid4().hex}.xlsx"
+        out_path = self.export_dir / filename
+        wb.save(str(out_path))
+        return filename
+
+    @staticmethod
+    def _parse_score(v: Any) -> Optional[float | int]:
+        if v is None:
+            return None
+        if isinstance(v, (int, float)):
+            return int(v) if isinstance(v, int) or abs(v - int(v)) < 1e-9 else float(v)
+
+        s = str(v).strip()
+        if not re.match(r"^-?\d+(\.\d+)?$", s):
+            return None
+            
+        try:
+            num = float(s)
+            return int(num) if abs(num - int(num)) < 1e-9 else round(num, 2)
+        except Exception:
+            return None

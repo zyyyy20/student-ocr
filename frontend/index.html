@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>班级成绩单自动识别系统</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <div class="header-top">
+          <div class="title">班级成绩单自动识别系统</div>
+          <div class="badges">
+            <span class="badge">CPU</span>
+            <span class="badge">多行表格</span>
+            <span class="badge">可编辑</span>
+          </div>
+        </div>
+        <div class="subtitle">上传班级成绩单（支持多行数据） → 自动识别 → 校对编辑 → 导出 Excel</div>
+      </header>
+
+      <main class="panels">
+        <section class="panel left">
+          <div class="card">
+            <div class="card-title">上传文件</div>
+            <div class="upload-row">
+              <input id="fileInput" type="file" accept=".png,.jpg,.jpeg,.svg,.xlsx" />
+              <button id="uploadBtn" class="btn primary" disabled>开始识别</button>
+            </div>
+            <div id="status" class="status">请选择 PNG/JPG/SVG/XLSX 文件</div>
+          </div>
+
+          <div class="card">
+            <div class="card-title">原始文件预览</div>
+            <div id="preview" class="preview">
+              <div class="preview-placeholder">等待上传</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel right">
+          <div class="card full-height">
+            <div class="card-title row">
+              <span>识别结果（可编辑）</span>
+              <div class="actions">
+                <button id="addRowBtn" class="btn">添加行</button>
+                <button id="exportBtn" class="btn primary" disabled>导出 Excel</button>
+              </div>
+            </div>
+
+            <div class="table-wrap">
+              <table id="resultTable" class="table">
+                <thead id="thead">
+                  <tr>
+                    <th>内容</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody id="tbody">
+                  <tr class="empty">
+                    <td colspan="2">尚无数据，请先上传并识别</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="hint">
+              低置信度（&lt; 0.85）的单元格会标红；手动编辑后默认置信度记为 1.00。
+            </div>
+            <div id="download" class="download"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/static/script.js"></script>
+  </body>
+</html>
