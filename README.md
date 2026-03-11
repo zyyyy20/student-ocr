@@ -1,6 +1,17 @@
 # 学生成绩单自动识别系统（班级版）
 
-本项目采用前后端分离架构，后端 FastAPI + PaddleOCR（CPU），前端原生 HTML/CSS/JS。
+本项目采用前后端分离架构：
+- 后端：FastAPI + PaddleOCR（CPU 推理）
+- 前端：原生 HTML/CSS/JS（由后端在 `/` 直接提供页面）
+
+支持上传班级成绩单截图/文件，自动识别为可编辑表格，并导出 Excel。
+
+## 功能特性
+
+- 支持多种输入：PNG/JPG/SVG/XLSX
+- 表格识别：优先表格结构解析，必要时自动降级为文本兜底
+- 识别结果可编辑：低置信度单元格标红，可调整标红阈值
+- 一键导出：生成 Excel 并提供下载链接
 
 ## 环境要求
 
@@ -27,6 +38,14 @@
 python -m pip install -r requirements.txt
 ```
 
+## 快速开始（Windows PowerShell）
+
+可选（加速 PaddleX 模型源检查；建议首次安装后开启）：
+
+```powershell
+set PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+```
+
 ## 启动服务
 
 ```bash
@@ -39,6 +58,32 @@ python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 http://localhost:8000/
 ```
 
+## 使用流程
+
+1. 打开页面 `http://localhost:8000/`
+2. 拖拽文件到上传区（或点击选择）
+3. 点击“开始识别”
+4. 在右侧表格中校对/编辑（低置信度单元格会标红；可通过“标红阈值”滑块调整）
+5. 点击“导出 Excel”，按提示下载生成的文件
+
+导出文件默认存放在 `backend/static/exports/`，并通过 `/downloads/<filename>` 提供下载。
+
+## 接口一览（开发/联调）
+
+- `GET /`：前端页面
+- `POST /upload`：上传文件并识别，返回 `{ headers, rows }`
+- `POST /export`：接收前端编辑后的 JSON，生成 Excel，返回 `{ download_url }`
+- `GET /health`：健康检查
+
+## 目录结构
+
+- `backend/`：FastAPI 后端
+  - `backend/main.py`：应用入口、路由
+  - `backend/services/ocr_service.py`：OCR 与表格识别封装
+  - `backend/services/parser_service.py`：文件解析入口（PNG/JPG/SVG/XLSX）
+  - `backend/services/excel_service.py`：Excel 导出
+- `frontend/`：前端静态资源（由后端挂载在 `/static`）
+
 ## 常见问题
 
 1. 若看到 `ConvertPirAttribute2RuntimeAttribute not support` 报错，请确认已使用：
@@ -47,9 +92,17 @@ http://localhost:8000/
 paddlepaddle==3.2.0
 ```
 
-2. 如果提示模型源检查耗时较长，可设置环境变量加速：
+2. 首次识别很慢/卡住？
+
+- Paddle/PaddleX 可能需要首次下载/初始化模型（时间较长属于正常现象）
+- 建议开启环境变量以跳过模型源检查：
 
 ```bash
 set PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
 ```
+
+3. 识别结果缺字、数字漏位（例如 99 变成 9）？
+
+- 截图分辨率过低或文字贴边时更容易发生，建议：尽量截取清晰、包含完整边框的区域
+- 项目已对小图做了加白边与放大预处理，以提高稳定性；仍有问题可提供样例进一步优化
 
