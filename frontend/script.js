@@ -13,6 +13,7 @@ const thresholdInput = document.getElementById("threshold");
 const thresholdValueEl = document.getElementById("thresholdValue");
 const fileMetaEl = document.getElementById("fileMeta");
 const lowCountEl = document.getElementById("lowCount");
+const riskColumnSelect = document.getElementById("riskColumn");
 
 let selectedFile = null;
 let currentHeaders = []; // 存储当前表格的表头 ["姓名", "成绩", ...]
@@ -59,20 +60,30 @@ function refreshLowConfidenceSummary() {
   lowCountEl.textContent = n > 0 ? `（当前标红：${n} 个）` : "";
 }
 
+function updateRowNumbers() {
+  const rows = tbody.querySelectorAll("tr[data-row='1']");
+  rows.forEach((tr, idx) => {
+    const cell = tr.querySelector("td[data-col='__index__']");
+    if (cell) cell.textContent = String(idx + 1);
+  });
+}
+
 function clearTable() {
   thead.innerHTML = `
     <tr>
+      <th class="col-index" data-col="__index__">序号</th>
       <th>内容</th>
       <th>操作</th>
     </tr>
   `;
   tbody.innerHTML = `
     <tr class="empty">
-      <td colspan="2">尚无数据，请先上传并识别</td>
+      <td colspan="3">尚无数据，请先上传并识别</td>
     </tr>
   `;
   currentHeaders = [];
   refreshLowConfidenceSummary();
+  updateRiskColumns({ preserveSelection: false });
 }
 
 function renderPreview(file) {
@@ -137,9 +148,16 @@ function addRow(values = {}, confidences = {}) {
   const tr = document.createElement("tr");
   tr.dataset.row = "1";
 
+  const tdIndex = document.createElement("td");
+  tdIndex.className = "col-index";
+  tdIndex.dataset.col = "__index__";
+  tdIndex.textContent = "1";
+  tr.appendChild(tdIndex);
+
   // 根据 currentHeaders 生成对应的单元格
   for (const header of currentHeaders) {
     const td = document.createElement("td");
+    td.dataset.col = header;
     const val = values[header] ?? "";
     const conf = confidences[header] ?? 1.0;
     
@@ -149,6 +167,7 @@ function addRow(values = {}, confidences = {}) {
 
   // 操作列
   const tdOp = document.createElement("td");
+  tdOp.dataset.col = "__action__";
   const delBtn = document.createElement("button");
   delBtn.className = "btn";
   delBtn.textContent = "删除";
@@ -163,6 +182,8 @@ function addRow(values = {}, confidences = {}) {
       tbody.appendChild(emptyRow);
     }
     refreshLowConfidenceSummary();
+    updateRowNumbers();
+    updateRiskColumns({ preserveSelection: true });
   });
   tdOp.appendChild(delBtn);
   tr.appendChild(tdOp);
@@ -173,6 +194,9 @@ function addRow(values = {}, confidences = {}) {
   
   tbody.appendChild(tr);
   refreshLowConfidenceSummary();
+  updateRowNumbers();
+  updateRiskColumns({ preserveSelection: true });
+  applyColumnFilter();
 }
 
 function renderTranscript(data) {
@@ -190,16 +214,17 @@ function renderTranscript(data) {
 
   // 渲染表头
   let thHtml = "";
+  thHtml += `<th class="col-index" data-col="__index__">序号</th>`;
   for (const h of headers) {
-    thHtml += `<th>${h}</th>`;
+    thHtml += `<th data-col="${h}">${h}</th>`;
   }
-  thHtml += `<th>操作</th>`;
+  thHtml += `<th data-col="__action__">操作</th>`;
   thead.innerHTML = `<tr>${thHtml}</tr>`;
 
   // 渲染内容
   tbody.innerHTML = "";
   if (rows.length === 0) {
-    const colSpan = headers.length + 1;
+    const colSpan = headers.length + 2;
     tbody.innerHTML = `<tr class="empty"><td colspan="${colSpan}">未识别到数据行</td></tr>`;
   } else {
     for (const row of rows) {
@@ -210,6 +235,9 @@ function renderTranscript(data) {
   downloadEl.innerHTML = "";
   exportBtn.disabled = false;
   refreshLowConfidenceSummary();
+  updateRowNumbers();
+  updateRiskColumns({ preserveSelection: false });
+  applyColumnFilter();
 }
 
 async function uploadFile(file) {
@@ -336,6 +364,7 @@ thresholdInput?.addEventListener("input", () => {
     applyLowConfidenceStyle(el, conf);
   });
   refreshLowConfidenceSummary();
+  updateRiskColumns({ preserveSelection: true });
 });
 
 uploadBtn.addEventListener("click", async () => {
@@ -394,3 +423,64 @@ renderPreview(null);
 clearTable();
 setFileMeta(null);
 if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
+
+function updateRiskColumns({ preserveSelection }) {
+  if (!riskColumnSelect) return;
+  const currentValue = riskColumnSelect.value;
+  const counts = new Map();
+
+  currentHeaders.forEach((h) => counts.set(h, 0));
+  const rows = tbody.querySelectorAll("tr[data-row='1']");
+  rows.forEach((tr) => {
+    const cells = tr.querySelectorAll(".cell-editable");
+    cells.forEach((span) => {
+      const field = span.dataset.field;
+      const conf = Number(span.dataset.confidence ?? 1);
+      if (field && conf < threshold) {
+        counts.set(field, (counts.get(field) || 0) + 1);
+      }
+    });
+  });
+
+  const options = [];
+  counts.forEach((count, header) => {
+    if (count > 0) options.push({ header, count });
+  });
+  options.sort((a, b) => b.count - a.count);
+
+  riskColumnSelect.innerHTML = `<option value="">全部列</option>`;
+  options.forEach((opt) => {
+    const el = document.createElement("option");
+    el.value = opt.header;
+    el.textContent = `${opt.header}（${opt.count}）`;
+    riskColumnSelect.appendChild(el);
+  });
+
+  if (preserveSelection && currentValue) {
+    const stillExists = [...riskColumnSelect.options].some((o) => o.value === currentValue);
+    riskColumnSelect.value = stillExists ? currentValue : "";
+  }
+  applyColumnFilter();
+}
+
+function applyColumnFilter() {
+  if (!riskColumnSelect) return;
+  const target = riskColumnSelect.value;
+  const cols = document.querySelectorAll("[data-col]");
+  cols.forEach((el) => {
+    const col = el.dataset.col;
+    if (!target) {
+      el.classList.remove("col-hidden");
+      return;
+    }
+    if (col === "__index__" || col === "__action__" || col === target) {
+      el.classList.remove("col-hidden");
+    } else {
+      el.classList.add("col-hidden");
+    }
+  });
+}
+
+riskColumnSelect?.addEventListener("change", () => {
+  applyColumnFilter();
+});

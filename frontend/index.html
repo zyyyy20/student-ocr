@@ -57,6 +57,12 @@
             <div class="card-title row">
               <span>识别结果（可编辑）</span>
               <div class="actions">
+                <div class="filter">
+                  <label for="riskColumn">高风险列</label>
+                  <select id="riskColumn">
+                    <option value="">全部列</option>
+                  </select>
+                </div>
                 <button id="addRowBtn" class="btn">添加行</button>
                 <button id="exportBtn" class="btn primary" disabled>导出 Excel</button>
               </div>
@@ -66,13 +72,14 @@
               <table id="resultTable" class="table">
                 <thead id="thead">
                   <tr>
+                    <th class="col-index">序号</th>
                     <th>内容</th>
                     <th>操作</th>
                   </tr>
                 </thead>
                 <tbody id="tbody">
                   <tr class="empty">
-                    <td colspan="2">尚无数据，请先上传并识别</td>
+                    <td colspan="3">尚无数据，请先上传并识别</td>
                   </tr>
                 </tbody>
               </table>
