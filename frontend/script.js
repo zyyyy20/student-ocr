@@ -1,7 +1,7 @@
-const THRESHOLD = 0.85;
-
 const fileInput = document.getElementById("fileInput");
+const dropzone = document.getElementById("dropzone");
 const uploadBtn = document.getElementById("uploadBtn");
+const clearBtn = document.getElementById("clearBtn");
 const statusEl = document.getElementById("status");
 const previewEl = document.getElementById("preview");
 const tbody = document.getElementById("tbody");
@@ -9,14 +9,54 @@ const thead = document.getElementById("thead");
 const addRowBtn = document.getElementById("addRowBtn");
 const exportBtn = document.getElementById("exportBtn");
 const downloadEl = document.getElementById("download");
+const thresholdInput = document.getElementById("threshold");
+const thresholdValueEl = document.getElementById("thresholdValue");
+const fileMetaEl = document.getElementById("fileMeta");
+const lowCountEl = document.getElementById("lowCount");
 
 let selectedFile = null;
 let currentHeaders = []; // 存储当前表格的表头 ["姓名", "成绩", ...]
+let threshold = Number(thresholdInput?.value ?? 0.85);
 
 function setStatus(text, type) {
   statusEl.textContent = text;
   statusEl.classList.remove("ok", "error");
   if (type) statusEl.classList.add(type);
+}
+
+function setLoading(btn, loading) {
+  if (!btn) return;
+  if (loading) btn.dataset.loading = "1";
+  else delete btn.dataset.loading;
+}
+
+function formatBytes(bytes) {
+  const n = Number(bytes ?? 0);
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
+function setFileMeta(file) {
+  if (!fileMetaEl) return;
+  if (!file) {
+    fileMetaEl.textContent = "";
+    return;
+  }
+  fileMetaEl.textContent = `已选择：${file.name}（${formatBytes(file.size)}）`;
+}
+
+function refreshLowConfidenceSummary() {
+  if (!lowCountEl) return;
+  const cells = document.querySelectorAll(".cell-editable.low");
+  const n = cells.length;
+  lowCountEl.textContent = n > 0 ? `（当前标红：${n} 个）` : "";
 }
 
 function clearTable() {
@@ -32,6 +72,7 @@ function clearTable() {
     </tr>
   `;
   currentHeaders = [];
+  refreshLowConfidenceSummary();
 }
 
 function renderPreview(file) {
@@ -71,7 +112,7 @@ function renderPreview(file) {
 
 function applyLowConfidenceStyle(el, conf) {
   el.classList.remove("low");
-  if (conf != null && conf < THRESHOLD) el.classList.add("low");
+  if (conf != null && conf < threshold) el.classList.add("low");
 }
 
 function makeEditableCell(text, field, confidence) {
@@ -85,6 +126,7 @@ function makeEditableCell(text, field, confidence) {
   span.addEventListener("input", () => {
     span.dataset.confidence = "1";
     applyLowConfidenceStyle(span, 1);
+    refreshLowConfidenceSummary();
   });
 
   applyLowConfidenceStyle(span, confidence);
@@ -120,6 +162,7 @@ function addRow(values = {}, confidences = {}) {
       emptyRow.innerHTML = `<td colspan="${colSpan}">暂无数据</td>`;
       tbody.appendChild(emptyRow);
     }
+    refreshLowConfidenceSummary();
   });
   tdOp.appendChild(delBtn);
   tr.appendChild(tdOp);
@@ -129,6 +172,7 @@ function addRow(values = {}, confidences = {}) {
   if (empty) empty.remove();
   
   tbody.appendChild(tr);
+  refreshLowConfidenceSummary();
 }
 
 function renderTranscript(data) {
@@ -165,6 +209,7 @@ function renderTranscript(data) {
 
   downloadEl.innerHTML = "";
   exportBtn.disabled = false;
+  refreshLowConfidenceSummary();
 }
 
 async function uploadFile(file) {
@@ -224,18 +269,80 @@ function buildPayloadFromUI() {
 }
 
 fileInput.addEventListener("change", () => {
-  selectedFile = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+  const f = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
+  setSelectedFile(f);
+});
+
+function isSupportedFile(file) {
+  const name = (file?.name || "").toLowerCase();
+  return (
+    name.endsWith(".png") ||
+    name.endsWith(".jpg") ||
+    name.endsWith(".jpeg") ||
+    name.endsWith(".svg") ||
+    name.endsWith(".xlsx")
+  );
+}
+
+function setSelectedFile(file) {
+  selectedFile = file;
   uploadBtn.disabled = !selectedFile;
+  clearBtn.disabled = !selectedFile;
   exportBtn.disabled = true;
   downloadEl.innerHTML = "";
+  setFileMeta(selectedFile);
   renderPreview(selectedFile);
   clearTable();
   if (selectedFile) setStatus("已选择文件，点击“开始识别”进行处理", "");
+  else setStatus("请选择 PNG/JPG/SVG/XLSX 文件", "");
+}
+
+dropzone?.addEventListener("click", () => fileInput.click());
+dropzone?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    fileInput.click();
+  }
+});
+
+dropzone?.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropzone.classList.add("dragover");
+});
+dropzone?.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
+dropzone?.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropzone.classList.remove("dragover");
+  const f = e.dataTransfer?.files?.[0];
+  if (!f) return;
+  if (!isSupportedFile(f)) {
+    setSelectedFile(null);
+    setStatus("不支持的文件类型：仅支持 PNG/JPG/SVG/XLSX", "error");
+    return;
+  }
+  setSelectedFile(f);
+});
+
+clearBtn.addEventListener("click", () => {
+  fileInput.value = "";
+  setSelectedFile(null);
+});
+
+thresholdInput?.addEventListener("input", () => {
+  threshold = Number(thresholdInput.value);
+  if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
+  document.querySelectorAll(".cell-editable").forEach((el) => {
+    const conf = Number(el.dataset.confidence ?? 1);
+    applyLowConfidenceStyle(el, conf);
+  });
+  refreshLowConfidenceSummary();
 });
 
 uploadBtn.addEventListener("click", async () => {
   if (!selectedFile) return;
   uploadBtn.disabled = true;
+  clearBtn.disabled = true;
+  setLoading(uploadBtn, true);
   setStatus("识别中，请稍候…（首次加载 OCR 模型可能较慢）", "");
 
   try {
@@ -248,6 +355,8 @@ uploadBtn.addEventListener("click", async () => {
     exportBtn.disabled = true;
   } finally {
     uploadBtn.disabled = false;
+    clearBtn.disabled = !selectedFile;
+    setLoading(uploadBtn, false);
   }
 });
 
@@ -261,6 +370,7 @@ addRowBtn.addEventListener("click", () => {
 
 exportBtn.addEventListener("click", async () => {
   exportBtn.disabled = true;
+  setLoading(exportBtn, true);
   downloadEl.innerHTML = "";
   setStatus("导出中…", "");
 
@@ -276,8 +386,11 @@ exportBtn.addEventListener("click", async () => {
     setStatus(`导出失败：${e.message || e}`, "error");
   } finally {
     exportBtn.disabled = false;
+    setLoading(exportBtn, false);
   }
 });
 
 renderPreview(null);
 clearTable();
+setFileMeta(null);
+if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);

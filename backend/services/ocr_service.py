@@ -28,6 +28,11 @@ class OCRService:
         self.lang = lang
         self._ocr = None
         self._table_engine = None
+        # 小图（截图/裁剪图）在 PaddleOCR 中容易漏字/漏数字。
+        # 通过“加白边 + 放大”可显著提升识别稳定性。
+        self._small_image_min_side = 600
+        self._small_image_pad = 20
+        self._small_image_scale = 2.0
 
     @staticmethod
     def _create_with_compat(factory, kwargs: Dict[str, Any]):
@@ -85,11 +90,45 @@ class OCRService:
             raise ValueError("无法解码图片：请确认文件为 PNG/JPG")
         return img
 
-    def recognize_text(self, image_bgr: np.ndarray) -> List[OCRItem]:
+    def preprocess_image(self, image_bgr: np.ndarray) -> np.ndarray:
+        """
+        OCR 预处理：
+        - 对较小截图加白边，避免边缘文字被截断/漏检
+        - 对较小截图放大，提高字符可分辨率（如 99->9 的问题）
+        """
+        if image_bgr is None:
+            return image_bgr
+
+        h, w = image_bgr.shape[:2]
+        if min(h, w) >= self._small_image_min_side:
+            return image_bgr
+
+        padded = cv2.copyMakeBorder(
+            image_bgr,
+            self._small_image_pad,
+            self._small_image_pad,
+            self._small_image_pad,
+            self._small_image_pad,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(255, 255, 255),
+        )
+        scaled = cv2.resize(
+            padded,
+            None,
+            fx=self._small_image_scale,
+            fy=self._small_image_scale,
+            interpolation=cv2.INTER_CUBIC,
+        )
+        return scaled
+
+    def recognize_text(self, image_bgr: np.ndarray, *, preprocess: bool = True) -> List[OCRItem]:
         """
         返回整图 OCR 的文本行信息（含置信度、检测框）。
         PaddleOCR 返回结构示例：[[box, (text, conf)], ...]
         """
+        if preprocess:
+            image_bgr = self.preprocess_image(image_bgr)
+
         ocr = self._get_ocr()
         try:
             results = ocr.ocr(image_bgr, cls=True)
@@ -150,12 +189,57 @@ class OCRService:
             items.append(OCRItem(text=text, confidence=conf, box=self._coerce_box(box)))
         return items
 
-    def recognize_table(self, image_bgr: np.ndarray) -> Optional[List[List[str]]]:
+    @staticmethod
+    def _grid_score(grid: Optional[List[List[str]]]) -> int:
+        """
+        估算 grid “像表格”的程度，用于在多种识别路径间做轻量选择。
+        分数越高越可信。
+        """
+        if not grid or len(grid) < 2:
+            return 0
+
+        # rows/cols 基础分
+        rows = len(grid)
+        cols = max((len(r) for r in grid if r), default=0)
+        if cols < 2:
+            return 0
+
+        head = "".join(grid[0] or [])
+        keywords = ("姓名", "班级", "学号", "科目", "成绩", "分数", "平时", "期中", "期末")
+        kw_hits = sum(1 for k in keywords if k in head)
+
+        # 空值过多惩罚：首行空单元格占比过高通常代表结构不稳
+        head_cells = grid[0] or []
+        empty = sum(1 for c in head_cells if not (c or "").strip())
+        empty_penalty = int((empty / max(1, len(head_cells))) * 10)
+
+        return int(kw_hits * 12 + cols * 3 + min(rows, 50) - empty_penalty)
+
+    def recognize_table(
+        self,
+        image_bgr: np.ndarray,
+        *,
+        ocr_items: Optional[Sequence[OCRItem]] = None,
+        preprocess: bool = True,
+    ) -> Optional[List[List[str]]]:
         """
         表格识别：
-        1) 优先使用 PaddleX 的 table_recognition pipeline（若依赖缺失/不可用则自动降级）
-        2) 降级：使用 OCR 检测框按行列重建一个二维数组
+        - 先尝试基于 OCR 检测框重建二维表格（对“截图类班级表”更快更轻量）
+        - 若重建效果不佳，再尝试 PaddleX table_recognition pipeline（若可用）
         """
+        if preprocess:
+            image_bgr = self.preprocess_image(image_bgr)
+
+        # 1) 轻量路径：OCR 检测框聚类重建表格
+        if ocr_items is None:
+            ocr_items = self.recognize_text(image_bgr, preprocess=False)
+
+        grid_from_items = self._items_to_grid(ocr_items)
+        score_items = self._grid_score(grid_from_items)
+        if score_items >= 20:
+            return grid_from_items
+
+        # 2) 重路径：PaddleX TableRecognition
         try:
             engine = self._get_table_engine()
             # pipeline.predict 既支持图片路径，也支持 ndarray；这里直接传 ndarray
@@ -164,13 +248,14 @@ class OCRService:
             if out and isinstance(out[0], dict):
                 html = out[0].get("html")
                 if html:
-                    return self._html_table_to_grid(html)
+                    grid_from_html = self._html_table_to_grid(html)
+                    score_html = self._grid_score(grid_from_html)
+                    if score_html > score_items:
+                        return grid_from_html
         except Exception:
             pass
 
-        items = self.recognize_text(image_bgr)
-        grid = self._items_to_grid(items)
-        return grid if grid and len(grid) >= 2 else None
+        return grid_from_items if grid_from_items and len(grid_from_items) >= 2 else None
 
     @staticmethod
     def _coerce_box(raw: Any) -> List[List[float]]:

@@ -24,10 +24,13 @@ class MockOCRService(OCRService):
         self._ocr = None
         self._table_engine = None
 
+    def preprocess_image(self, image_bgr):
+        return image_bgr
+
     def decode_image(self, data: bytes):
         return MagicMock()  # Return a mock image object
 
-    def recognize_table(self, image_bgr):
+    def recognize_table(self, image_bgr, *, ocr_items=None, preprocess=True):
         # Return the grid structure as seen in the image
         return [
             ["姓名", "班级", "平时1", "平时2"],
@@ -38,7 +41,7 @@ class MockOCRService(OCRService):
             ["董虹", "794027", "65", "95"],
         ]
 
-    def recognize_text(self, image_bgr):
+    def recognize_text(self, image_bgr, *, preprocess=True):
         lines = [
             "姓名 班级 平时1 平时2",
             "班俊悟 995392 61 99",

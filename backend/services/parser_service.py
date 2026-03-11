@@ -62,23 +62,22 @@ class FileParserService:
 
     def _parse_image(self, data: bytes) -> Dict[str, Any]:
         image_bgr = self.ocr_service.decode_image(data)
+        image_bgr = self.ocr_service.preprocess_image(image_bgr)
+
+        # 先做一次文本 OCR（后续置信度匹配、表格重建都复用）
+        ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
 
         table = None
         try:
-            table = self.ocr_service.recognize_table(image_bgr)
+            table = self.ocr_service.recognize_table(image_bgr, ocr_items=ocr_items, preprocess=False)
         except Exception:
             table = None
 
-        ocr_items = self.ocr_service.recognize_text(image_bgr)
-        
         if table and len(table) >= 2:
-            # 优先使用表格结构解析
             return self._extract_class_grid(table, ocr_items=ocr_items, default_conf=0.85)
-        
-        # 兜底：如果没有识别到表格，尝试从文本行构建（暂时只支持简单的一维列表，或者报错）
-        # 这里为了兼容，如果无法识别表格，尝试构造一个单列文本列表
-        text_lines = [it.text for it in ocr_items]
-        return self._extract_from_text_lines_fallback(text_lines)
+
+        # 兜底：无法识别表格结构时，返回单列文本列表
+        return self._extract_from_text_lines_fallback([it.text for it in ocr_items])
 
     def _parse_svg(self, data: bytes) -> Dict[str, Any]:
         # 1) 优先解析 SVG 文本节点
