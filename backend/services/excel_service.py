@@ -27,6 +27,7 @@ class ExcelService:
         if not isinstance(payload, dict):
             raise HTTPException(status_code=400, detail="导出数据格式错误：payload 必须为 JSON 对象")
 
+        title = payload.get("title") or ""
         headers = payload.get("headers") or []
         rows = payload.get("rows") or []
         
@@ -38,17 +39,28 @@ class ExcelService:
         ws.title = "班级成绩单"
 
         bold = Font(bold=True)
-        
+        title_font = Font(bold=True, size=14)
+        row_offset = 0
+
+        # 0. 写入标题（可选）
+        if isinstance(title, str) and title.strip():
+            row_offset = 1
+            title_value = title.strip()
+            ws.cell(row=1, column=1, value=title_value).font = title_font
+            ws.cell(row=1, column=1).alignment = Alignment(horizontal="center", vertical="center")
+            if headers:
+                ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(headers)))
+
         # 1. 写入表头
         for col_idx, header in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col_idx, value=str(header))
+            cell = ws.cell(row=1 + row_offset, column=col_idx, value=str(header))
             cell.font = bold
             cell.alignment = Alignment(horizontal="center", vertical="center")
             # 简单设置列宽
             ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 15
 
         # 2. 写入数据行
-        for row_idx, row_item in enumerate(rows, start=2):
+        for row_idx, row_item in enumerate(rows, start=2 + row_offset):
             # row_item 可能是 {"values": {...}, "confidences": {...}}
             values = row_item.get("values", {})
             if not isinstance(values, dict):

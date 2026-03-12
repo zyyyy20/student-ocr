@@ -14,10 +14,12 @@ const thresholdValueEl = document.getElementById("thresholdValue");
 const fileMetaEl = document.getElementById("fileMeta");
 const lowCountEl = document.getElementById("lowCount");
 const riskColumnSelect = document.getElementById("riskColumn");
+const resultTitleEl = document.getElementById("resultTitle");
 
 let selectedFile = null;
 let currentHeaders = []; // 存储当前表格的表头 ["姓名", "成绩", ...]
 let threshold = Number(thresholdInput?.value ?? 0.85);
+let currentTitle = "";
 
 function setStatus(text, type) {
   statusEl.textContent = text;
@@ -82,6 +84,8 @@ function clearTable() {
     </tr>
   `;
   currentHeaders = [];
+  currentTitle = "";
+  if (resultTitleEl) resultTitleEl.textContent = "";
   refreshLowConfidenceSummary();
   updateRiskColumns({ preserveSelection: false });
 }
@@ -203,6 +207,7 @@ function renderTranscript(data) {
   // data: { headers: [...], rows: [{values: {}, confidences: {}}, ...] }
   const headers = Array.isArray(data.headers) ? data.headers : [];
   const rows = Array.isArray(data.rows) ? data.rows : [];
+  const title = typeof data.title === "string" ? data.title.trim() : "";
 
   if (headers.length === 0) {
     clearTable();
@@ -211,6 +216,8 @@ function renderTranscript(data) {
   }
 
   currentHeaders = headers;
+  currentTitle = title;
+  if (resultTitleEl) resultTitleEl.textContent = title || "";
 
   // 渲染表头
   let thHtml = "";
@@ -291,6 +298,7 @@ function buildPayloadFromUI() {
   }
 
   return {
+    title: currentTitle,
     headers: currentHeaders,
     rows: payloadRows
   };

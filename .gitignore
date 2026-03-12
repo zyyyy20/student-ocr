@@ -42,6 +42,8 @@ Desktop.ini
 backend/static/exports/*.xlsx
 preprocessed*.png
 mask*.png
+table_roi.png
+Snipaste_*.png
 
 # Local fonts cache
 frontend/fonts/*.woff2

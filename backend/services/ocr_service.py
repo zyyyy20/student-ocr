@@ -40,6 +40,11 @@ class OCRService:
         self._deskew_projection_step = 0.5
         self._deskew_estimate_max_side = 1200
         self._deskew_pad = 20
+        # 标题/表格区域处理
+        self._table_roi_min_ratio = 0.55
+        self._title_max_rows = 3
+        self._title_max_chars = 12
+        self._title_min_width_ratio = 0.35
 
     @staticmethod
     def _create_with_compat(factory, kwargs: Dict[str, Any]):
@@ -136,7 +141,10 @@ class OCRService:
                 paper_mask_after = self._extract_paper_mask(image_bgr)
                 image_bgr = self._crop_to_paper(image_bgr, paper_mask_after)
 
-        # 2) 小图增强（加白边 + 放大）
+        # 2) 尝试裁切表格/标题区域（避免大标题干扰）
+        image_bgr = self._crop_to_table_or_title(image_bgr)
+
+        # 3) 小图增强（加白边 + 放大）
         h, w = image_bgr.shape[:2]
         if min(h, w) >= self._small_image_min_side:
             return image_bgr
@@ -386,6 +394,147 @@ class OCRService:
             return image_bgr
 
         return image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+
+    def _crop_to_table_or_title(self, image_bgr: np.ndarray) -> np.ndarray:
+        """
+        优先裁切表格区域；若无法检测表格区域，则尝试裁切掉顶部标题。
+        """
+        if image_bgr is None:
+            return image_bgr
+
+        # 1) 表格区域（基于水平/垂直线的交叉区域）
+        table_box = self._estimate_table_bbox(image_bgr)
+        if table_box is not None:
+            x1, y1, x2, y2 = table_box
+            return image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+
+        # 2) 标题裁切（基于文本行高度/位置）
+        title_crop = self._estimate_title_crop_y(image_bgr)
+        if title_crop is not None:
+            h, w = image_bgr.shape[:2]
+            y = min(max(0, title_crop), h - 1)
+            return image_bgr[y:, :]
+
+        return image_bgr
+
+    def _estimate_table_bbox(self, image_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        基于表格线检测估计表格区域边界。
+        """
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+
+        # 二值化强调表格线
+        bw = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10
+        )
+        h, w = bw.shape[:2]
+
+        # 检测水平/垂直线
+        horiz = cv2.morphologyEx(
+            bw,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 25), 1)),
+        )
+        vert = cv2.morphologyEx(
+            bw,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 25))),
+        )
+        grid = cv2.bitwise_or(horiz, vert)
+
+        contours, _ = cv2.findContours(grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        # 取最大区域
+        x, y, ww, hh = cv2.boundingRect(max(contours, key=cv2.contourArea))
+        if ww * hh < (self._table_roi_min_ratio * w * h):
+            return None
+
+        pad = 6
+        x1 = max(0, x - pad)
+        y1 = max(0, y - pad)
+        x2 = min(w - 1, x + ww + pad)
+        y2 = min(h - 1, y + hh + pad)
+        return x1, y1, x2, y2
+
+    def _estimate_title_crop_y(self, image_bgr: np.ndarray) -> Optional[int]:
+        """
+        尝试定位顶部标题行并给出裁切 y 坐标（裁掉标题）。
+        """
+        try:
+            ocr = self._get_ocr()
+            results = ocr.ocr(image_bgr, cls=True)
+        except Exception:
+            return None
+
+        items: List[OCRItem] = []
+        if not results:
+            return None
+
+        # 兼容 PaddleOCR 2.x/3.x
+        if isinstance(results, list) and results and isinstance(results[0], dict):
+            d = results[0]
+            texts = d.get("rec_texts") or []
+            scores = d.get("rec_scores") or []
+            polys = d.get("rec_polys") or d.get("dt_polys") or []
+            if hasattr(polys, "tolist"):
+                polys = polys.tolist()
+            if hasattr(scores, "tolist"):
+                scores = scores.tolist()
+            for i, text in enumerate(texts):
+                t = str(text).strip()
+                if not t:
+                    continue
+                box = self._coerce_box(polys[i] if i < len(polys) else None)
+                items.append(OCRItem(text=t, confidence=float(scores[i] if i < len(scores) else 0), box=box))
+        elif isinstance(results, list) and results and isinstance(results[0], list):
+            for line in results[0] if isinstance(results, list) else results:
+                if not line or len(line) < 2:
+                    continue
+                box, rec = line[0], line[1]
+                if not rec or len(rec) < 2:
+                    continue
+                text = str(rec[0]).strip()
+                if not text:
+                    continue
+                items.append(OCRItem(text=text, confidence=float(rec[1]), box=self._coerce_box(box)))
+        else:
+            # 兼容 predict 返回非标准结构时，放弃标题裁切
+            return None
+
+        # 根据行高排序，优先选择顶部大字号行
+        candidates = []
+        for it in items:
+            bb = self._xyxy(it.box)
+            if not bb:
+                continue
+            x1, y1, x2, y2 = bb
+            w = x2 - x1
+            h = y2 - y1
+            if h <= 0:
+                continue
+            candidates.append((y1, y2, w, h, it.text))
+
+        if not candidates:
+            return None
+
+        # 选择顶部若干行中，宽度占比较高、字符数较少的行作为标题
+        candidates.sort(key=lambda x: x[0])
+        h_img, w_img = image_bgr.shape[:2]
+        top_rows = candidates[: self._title_max_rows]
+        # 使用中位行高估计标题行的大字特征
+        heights = [c[3] for c in top_rows]
+        med_h = sorted(heights)[len(heights) // 2] if heights else 0
+        for y1, y2, w, h, text in top_rows:
+            if (w / w_img) >= self._title_min_width_ratio and len(text) <= self._title_max_chars:
+                if med_h == 0 or h >= med_h * 1.1:
+                    return int(y2 + 6)
+
+        return None
 
     @staticmethod
     def _rotate_keep_size(image: np.ndarray, angle: float) -> np.ndarray:

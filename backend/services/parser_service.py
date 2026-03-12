@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import re
@@ -151,12 +151,35 @@ class FileParserService:
 
         # 1. 寻找表头行（假设第一行就是，或者根据关键词探测）
         header_row_idx = 0
+        title_text: Optional[str] = None
         for i, row in enumerate(grid[:5]):
             joined = "".join(row)
-            # 如果包含常见关键词，可能是表头
-            if any(k in joined for k in ("姓名", "班级", "学号", "科目", "成绩", "分数")):
+            non_empty = sum(1 for c in row if (c or "").strip())
+            # 标题行通常只有 1 个非空单元格，且包含“成绩表/成绩单”
+            if non_empty <= 2 and any(k in joined for k in ("成绩表", "成绩单")):
+                title_text = joined.strip()
+                continue
+            # 如果包含常见表头关键词，可能是表头
+            if any(k in joined for k in ("姓名", "班级", "学号", "科目", "成绩", "分数", "等级")):
                 header_row_idx = i
                 break
+
+        # 若第一行是标题（单格居中），而第二行更像表头，则跳过标题
+        if len(grid) >= 2:
+            first = grid[header_row_idx]
+            second = grid[header_row_idx + 1] if header_row_idx + 1 < len(grid) else []
+            first_non_empty = sum(1 for c in first if (c or "").strip())
+            second_non_empty = sum(1 for c in second if (c or "").strip())
+            first_joined = "".join(first)
+            second_joined = "".join(second)
+            if (
+                first_non_empty <= 2
+                and (any(k in first_joined for k in ("成绩表", "成绩单")) or first_non_empty == 1)
+                and second_non_empty >= 2
+                and any(k in second_joined for k in ("姓名", "班级", "学号", "科目", "成绩", "分数", "等级"))
+            ):
+                title_text = first_joined.strip() if first_joined.strip() else title_text
+                header_row_idx = header_row_idx + 1
         
         headers_raw = grid[header_row_idx]
         # 清洗表头：去除空白，保留原始文本
@@ -217,10 +240,34 @@ class FileParserService:
             
             rows_out.append({"values": values, "confidences": confidences})
             
-        return {
+        # 3. 剔除“全空的补位列”（常见于合并单元格导致的空列）
+        if rows_out:
+            non_empty_counts: Dict[str, int] = {h: 0 for h in headers}
+            for row in rows_out:
+                vals = row.get("values", {})
+                for h in headers:
+                    v = vals.get(h, "")
+                    if str(v).strip() != "":
+                        non_empty_counts[h] += 1
+
+            threshold = max(1, int(len(rows_out) * 0.05))
+            drop_headers = {
+                h for h in headers
+                if re.match(r"^列\d+$", h) and non_empty_counts.get(h, 0) <= threshold
+            }
+            if drop_headers:
+                headers = [h for h in headers if h not in drop_headers]
+                for row in rows_out:
+                    row["values"] = {k: v for k, v in row["values"].items() if k in headers}
+                    row["confidences"] = {k: v for k, v in row["confidences"].items() if k in headers}
+
+        result: Dict[str, Any] = {
             "headers": headers,
-            "rows": rows_out
+            "rows": rows_out,
         }
+        if title_text:
+            result["title"] = title_text
+        return result
 
     def _extract_from_text_lines_fallback(self, lines: List[str]) -> Dict[str, Any]:
         """
