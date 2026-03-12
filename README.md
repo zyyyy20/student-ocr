@@ -11,7 +11,8 @@
 - 支持多种输入：PNG/JPG/SVG/XLSX
 - 表格识别：优先表格结构解析，必要时自动降级为文本兜底
 - 识别结果可编辑：低置信度单元格标红，可调整标红阈值
-- 一键导出：生成 Excel 并提供下载链接
+- 标题识别：支持“带大标题”的成绩单，自动提取标题并展示/导出
+- 一键导出：生成 Excel 并提供下载链接（含标题行）
 
 ## 环境要求
 
@@ -72,17 +73,30 @@ http://localhost:8000/
 
 - `GET /`：前端页面
 - `POST /upload`：上传文件并识别，返回 `{ headers, rows }`
-- `POST /export`：接收前端编辑后的 JSON，生成 Excel，返回 `{ download_url }`
+- `POST /export`：接收前端编辑后的 JSON（含可选 `title`），生成 Excel，返回 `{ download_url }`
 - `GET /health`：健康检查
 
 ## 目录结构
 
 - `backend/`：FastAPI 后端
   - `backend/main.py`：应用入口、路由
-  - `backend/services/ocr_service.py`：OCR 与表格识别封装
-  - `backend/services/parser_service.py`：文件解析入口（PNG/JPG/SVG/XLSX）
-  - `backend/services/excel_service.py`：Excel 导出
+- `backend/services/ocr_service.py`：OCR 与表格识别封装
+- `backend/services/parser_service.py`：文件解析入口（PNG/JPG/SVG/XLSX）
+- `backend/services/excel_service.py`：Excel 导出
 - `frontend/`：前端静态资源（由后端挂载在 `/static`）
+
+## 阶段性说明（当前能力）
+
+- 支持带大标题的成绩单（如“学生成绩表”），标题会显示在页面并写入导出的 Excel
+- 支持倾斜截图纠偏（桌面截图/旋转图片可自动校正）
+- 表头与数据行识别稳定，合并单元格导致的“空列”会自动剔除
+
+## 图像预处理（当前实现）
+
+- 透明/棋盘背景处理：如 PNG 带透明通道，先合成白底，避免背景干扰
+- 倾斜纠偏：优先从“纸面区域”估计倾斜角；失败则使用 Hough 直线与投影法估计
+- 纸面裁切：纠偏后在安全条件下裁切到纸面区域，避免裁掉关键列
+- 小图增强：对较小截图加白边并放大，提高文字/数字识别稳定性
 
 ## 常见问题
 
