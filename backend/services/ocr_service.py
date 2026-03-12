@@ -33,6 +33,13 @@ class OCRService:
         self._small_image_min_side = 600
         self._small_image_pad = 20
         self._small_image_scale = 2.0
+        # 旋转纠偏（deskew）参数
+        self._deskew_max_angle = 30.0
+        self._deskew_min_abs_angle = 0.2
+        self._deskew_hough_min_lines = 6
+        self._deskew_projection_step = 0.5
+        self._deskew_estimate_max_side = 1200
+        self._deskew_pad = 20
 
     @staticmethod
     def _create_with_compat(factory, kwargs: Dict[str, Any]):
@@ -85,7 +92,7 @@ class OCRService:
         支持 PNG/JPG 等常见格式。
         """
         arr = np.frombuffer(data, dtype=np.uint8)
-        img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        img = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
         if img is None:
             raise ValueError("无法解码图片：请确认文件为 PNG/JPG")
         return img
@@ -95,10 +102,41 @@ class OCRService:
         OCR 预处理：
         - 对较小截图加白边，避免边缘文字被截断/漏检
         - 对较小截图放大，提高字符可分辨率（如 99->9 的问题）
+        - 对轻微倾斜做纠偏，提升表格与文本稳定性
         """
         if image_bgr is None:
             return image_bgr
 
+        # 若包含透明通道，先用 alpha 掩膜估计角度，再合成白底
+        did_alpha_deskew = False
+        if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 4:
+            bgr = image_bgr[:, :, :3]
+            alpha = image_bgr[:, :, 3]
+            angle = self._estimate_skew_min_area(alpha)
+            image_bgr = self._alpha_composite_white(bgr, alpha)
+            if angle is not None and abs(angle) >= self._deskew_min_abs_angle:
+                image_bgr = self._rotate_with_padding(image_bgr, angle, pad=self._deskew_pad)
+                did_alpha_deskew = True
+        elif len(image_bgr.shape) == 2:
+            image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+
+        # 1) 倾斜纠偏（对轻微旋转的截图更稳定）
+        if not did_alpha_deskew:
+            paper_mask = self._extract_paper_mask(image_bgr)
+            angle = None
+            if paper_mask is not None:
+                angle = self._estimate_skew_paper(paper_mask)
+                if angle is not None and abs(angle) < self._deskew_min_abs_angle:
+                    angle = None
+            if angle is None:
+                angle = self._estimate_skew_angle(image_bgr)
+            if angle is not None and abs(angle) >= self._deskew_min_abs_angle:
+                image_bgr = self._rotate_with_padding(image_bgr, angle, pad=self._deskew_pad)
+                # 旋转后再尝试裁切到纸面区域
+                paper_mask_after = self._extract_paper_mask(image_bgr)
+                image_bgr = self._crop_to_paper(image_bgr, paper_mask_after)
+
+        # 2) 小图增强（加白边 + 放大）
         h, w = image_bgr.shape[:2]
         if min(h, w) >= self._small_image_min_side:
             return image_bgr
@@ -120,6 +158,282 @@ class OCRService:
             interpolation=cv2.INTER_CUBIC,
         )
         return scaled
+
+    def _estimate_skew_angle(self, image_bgr: np.ndarray) -> Optional[float]:
+        """
+        估计小角度倾斜（单位：度，正值为逆时针）。
+        先尝试 Hough 直线，失败则用投影法兜底。
+        """
+        if image_bgr is None:
+            return None
+
+        # 降采样以加速估计
+        h, w = image_bgr.shape[:2]
+        scale = 1.0
+        max_side = max(h, w)
+        if max_side > self._deskew_estimate_max_side:
+            scale = self._deskew_estimate_max_side / max_side
+            image_small = cv2.resize(image_bgr, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+        else:
+            image_small = image_bgr
+
+        angle = self._estimate_skew_hough(image_small)
+        if angle is not None:
+            return float(angle)
+
+        angle = self._estimate_skew_projection(image_small)
+        return float(angle) if angle is not None else None
+
+    def _estimate_skew_paper(self, mask: np.ndarray) -> Optional[float]:
+        """
+        基于纸面区域的最小外接矩形估计倾斜角。
+        """
+        if mask is None or len(mask.shape) != 2:
+            return None
+
+        ys, xs = np.where(mask > 0)
+        if len(xs) < 200:
+            return None
+
+        coords = np.column_stack((xs, ys)).astype(np.float32)
+        rect = cv2.minAreaRect(coords)
+        angle = rect[2]
+        width, height = rect[1]
+        if width == 0 or height == 0:
+            return None
+
+        if width < height:
+            angle = angle + 90.0
+
+        if angle < -90:
+            angle += 180
+        if angle > 90:
+            angle -= 180
+
+        if abs(angle) > self._deskew_max_angle:
+            return None
+
+        return float(angle)
+
+    def _estimate_skew_min_area(self, alpha: np.ndarray) -> Optional[float]:
+        """
+        通过 alpha 掩膜的最小外接矩形估计倾斜角。
+        对透明背景截图更稳定。
+        """
+        if alpha is None:
+            return None
+
+        if len(alpha.shape) != 2:
+            return None
+
+        ys, xs = np.where(alpha > 0)
+        if len(xs) < 50:
+            return None
+
+        coords = np.column_stack((xs, ys)).astype(np.float32)
+        rect = cv2.minAreaRect(coords)
+        angle = rect[2]
+        width, height = rect[1]
+        if width == 0 or height == 0:
+            return None
+
+        # OpenCV 角度范围为 [-90, 0)
+        if width < height:
+            angle = angle + 90.0
+
+        # 归一化到 [-90, 90]
+        if angle < -90:
+            angle += 180
+        if angle > 90:
+            angle -= 180
+
+        if abs(angle) > self._deskew_max_angle:
+            return None
+
+        return float(angle)
+
+    def _estimate_skew_hough(self, image_bgr: np.ndarray) -> Optional[float]:
+        """
+        基于 Hough 直线的倾斜估计，偏向表格横线/文字行。
+        """
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=120, minLineLength=80, maxLineGap=10)
+        if lines is None:
+            return None
+
+        angles: List[float] = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            dx = x2 - x1
+            dy = y2 - y1
+            if dx == 0 and dy == 0:
+                continue
+            angle = np.degrees(np.arctan2(dy, dx))
+            # 归一化到 [-90, 90]
+            if angle < -90:
+                angle += 180
+            if angle > 90:
+                angle -= 180
+            # 只取接近水平的线，避免竖线干扰
+            if abs(angle) <= self._deskew_max_angle:
+                angles.append(angle)
+
+        if len(angles) < self._deskew_hough_min_lines:
+            return None
+
+        return float(np.median(angles))
+
+    def _estimate_skew_projection(self, image_bgr: np.ndarray) -> Optional[float]:
+        """
+        基于水平投影方差的倾斜估计（小角度扫描）。
+        """
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+
+        # 自适应二值化，文本为白色
+        _, bw = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        best_angle = None
+        best_score = -1.0
+        step = self._deskew_projection_step
+        max_angle = self._deskew_max_angle
+
+        for angle in np.arange(-max_angle, max_angle + 1e-6, step):
+            rotated = self._rotate_keep_size(bw, angle)
+            # 计算水平投影方差
+            proj = np.sum(rotated > 0, axis=1)
+            score = float(np.var(proj))
+            if score > best_score:
+                best_score = score
+                best_angle = angle
+
+        return float(best_angle) if best_angle is not None else None
+
+    @staticmethod
+    def _extract_paper_mask(image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        """
+        估计“纸面区域”掩膜：低饱和、高亮度。
+        对透明棋盘背景或灰底更稳。
+        """
+        if image_bgr is None:
+            return None
+
+        try:
+            hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+        except Exception:
+            return None
+
+        # 选择近白色区域（高亮度、低饱和），并通过形态学去掉棋盘噪声
+        v = hsv[:, :, 2]
+        v_blur = cv2.GaussianBlur(v, (5, 5), 0)
+        mask = cv2.inRange(hsv, (0, 0, 235), (179, 60, 255))
+        mask = cv2.bitwise_and(mask, cv2.threshold(v_blur, 235, 255, cv2.THRESH_BINARY)[1])
+        if mask is None:
+            return None
+
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return mask
+
+        largest = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest)
+        if area < 2000:
+            return mask
+
+        paper = np.zeros_like(mask)
+        cv2.drawContours(paper, [largest], -1, 255, thickness=-1)
+        return paper
+
+    @staticmethod
+    def _crop_to_paper(image_bgr: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
+        if image_bgr is None or mask is None:
+            return image_bgr
+
+        ys, xs = np.where(mask > 0)
+        if len(xs) < 200:
+            return image_bgr
+
+        x1, x2 = int(xs.min()), int(xs.max())
+        y1, y2 = int(ys.min()), int(ys.max())
+        h, w = image_bgr.shape[:2]
+        box_w = x2 - x1 + 1
+        box_h = y2 - y1 + 1
+        if box_w <= 0 or box_h <= 0:
+            return image_bgr
+
+        # 过于激进的裁切容易丢列，设置保守阈值
+        if (box_w / w) < 0.8 or (box_h / h) < 0.8 or (box_w * box_h) < (0.6 * w * h):
+            return image_bgr
+
+        pad = 30
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(w - 1, x2 + pad)
+        y2 = min(h - 1, y2 + pad)
+        if x2 <= x1 or y2 <= y1:
+            return image_bgr
+
+        return image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+
+    @staticmethod
+    def _rotate_keep_size(image: np.ndarray, angle: float) -> np.ndarray:
+        h, w = image.shape[:2]
+        center = (w / 2.0, h / 2.0)
+        m = cv2.getRotationMatrix2D(center, angle, 1.0)
+        return cv2.warpAffine(
+            image,
+            m,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0 if len(image.shape) == 2 else 255),
+        )
+
+    @staticmethod
+    def _rotate_with_padding(image: np.ndarray, angle: float, pad: int = 20) -> np.ndarray:
+        padded = cv2.copyMakeBorder(
+            image,
+            pad,
+            pad,
+            pad,
+            pad,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(255, 255, 255),
+        )
+        h, w = padded.shape[:2]
+        center = (w / 2.0, h / 2.0)
+        m = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(
+            padded,
+            m,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(180, 180, 180),
+        )
+        return rotated
+
+    @staticmethod
+    def _alpha_composite_white(bgr: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+        """
+        将带 alpha 的图片合成到白色背景，避免透明网格干扰。
+        """
+        a = (alpha.astype(np.float32) / 255.0)[..., None]
+        white = np.ones_like(bgr, dtype=np.float32) * 255.0
+        out = (bgr.astype(np.float32) * a + white * (1.0 - a)).astype(np.uint8)
+        return out
 
     def recognize_text(self, image_bgr: np.ndarray, *, preprocess: bool = True) -> List[OCRItem]:
         """

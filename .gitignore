@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Logs
+*.log
+
+# Editor
+.vscode/
+.idea/
+
+# OCR caches / models
+*.pdparams
+*.pdiparams
+*.pdmodel
+*.pdopt
+*.pkl
+*.bin
+*.onnx
+*.weights
+*.param
+*.model
+.paddlex/
+
+# Exports & generated files
+backend/static/exports/*.xlsx
+preprocessed*.png
+mask*.png
+
+# Local fonts cache
+frontend/fonts/*.woff2
+frontend/fonts/*.ttf
