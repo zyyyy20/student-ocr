@@ -43,6 +43,18 @@ const statusStyles = {
   error: 'text-destructive',
 }
 
+const formatBytes = (bytes) => {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let idx = 0
+  let value = bytes
+  while (value >= 1024 && idx < units.length - 1) {
+    value /= 1024
+    idx += 1
+  }
+  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[idx]}`
+}
+
 export default function App() {
   const fileInputRef = useRef(null)
   const [selectedFile, setSelectedFile] = useState(null)
@@ -80,6 +92,9 @@ export default function App() {
     })
     return count
   }, [tableData.rows, threshold])
+
+  const totalRows = tableData.rows?.length || 0
+  const totalColumns = tableData.headers?.length || 0
 
   const riskOptions = useMemo(() => {
     if (!tableData.rows?.length) return []
@@ -241,7 +256,9 @@ export default function App() {
     <div className="app-shell theme min-h-screen bg-background text-foreground">
       <div className="absolute inset-0 grain" />
       <div className="relative z-10 mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-6 px-4 py-8">
-        <header className="flex flex-col gap-4 rounded-2xl border border-border bg-card/80 px-6 py-5 shadow-sm backdrop-blur">
+        <header className="fade-rise relative flex flex-col gap-4 overflow-hidden rounded-2xl border border-border bg-card/80 px-6 py-5 shadow-sm backdrop-blur">
+          <div className="hero-sheen" />
+          <div className="hero-grid" />
           <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <h1 className="font-display text-2xl font-semibold tracking-tight">
@@ -257,15 +274,16 @@ export default function App() {
               <Badge variant="secondary">可编辑</Badge>
             </div>
           </div>
-          <div className="flex flex-col gap-2 text-sm text-muted-foreground md:flex-row md:items-center">
-            <span className="font-medium text-foreground">流程：</span>
-            <span>上传 → 识别 → 校对 → 导出</span>
+          <div className="status-pill">
+            <span className="status-dot" />
+            <span className="font-medium text-foreground">流程</span>
+            <span className="text-muted-foreground">上传 → 识别 → 校对 → 导出</span>
           </div>
         </header>
 
         <main className="grid gap-6 lg:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-6">
-            <Card>
+            <Card className="fade-rise" style={{ animationDelay: '80ms' }}>
               <CardHeader>
                 <CardTitle>上传文件</CardTitle>
                 <CardDescription>支持 PNG/JPG/SVG/XLSX</CardDescription>
@@ -273,7 +291,7 @@ export default function App() {
               <CardContent className="flex flex-col gap-4">
                 <div
                   className={cn(
-                    'relative flex flex-col gap-2 rounded-xl border border-dashed border-border bg-background/60 px-4 py-6 text-sm text-muted-foreground transition',
+                    'dropzone relative flex flex-col gap-2 rounded-xl border border-dashed border-border bg-background/70 px-4 py-6 text-sm text-muted-foreground transition',
                     isDragOver && 'border-primary bg-primary/10 text-foreground',
                   )}
                   onDragOver={(event) => {
@@ -306,6 +324,27 @@ export default function App() {
                     accept=".png,.jpg,.jpeg,.svg,.xlsx"
                     onChange={handleFileInput}
                   />
+                </div>
+
+                <div className="meta-grid">
+                  <div className="meta-item">
+                    <span className="meta-label">文件名称</span>
+                    <span className="meta-value">
+                      {selectedFile ? selectedFile.name : '-'}
+                    </span>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">文件类型</span>
+                    <span className="meta-value">
+                      {selectedFile ? selectedFile.type || 'unknown' : '-'}
+                    </span>
+                  </div>
+                  <div className="meta-item">
+                    <span className="meta-label">文件大小</span>
+                    <span className="meta-value">
+                      {selectedFile ? formatBytes(selectedFile.size) : '-'}
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -347,7 +386,7 @@ export default function App() {
               </CardContent>
             </Card>
 
-            <Card>
+            <Card className="fade-rise" style={{ animationDelay: '140ms' }}>
               <CardHeader>
                 <CardTitle>原始文件预览</CardTitle>
                 <CardDescription>识别前可预览文件</CardDescription>
@@ -366,7 +405,7 @@ export default function App() {
             </Card>
           </div>
 
-          <Card className="flex h-full flex-col">
+          <Card className="fade-rise flex h-full flex-col" style={{ animationDelay: '200ms' }}>
             <CardHeader className="flex flex-col gap-4">
               <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
@@ -401,11 +440,17 @@ export default function App() {
               </div>
             </CardHeader>
             <CardContent className="flex flex-1 flex-col gap-4">
-              <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-center text-sm text-muted-foreground">
+              <div className="title-chip rounded-xl border border-border bg-muted/30 px-4 py-3 text-center text-sm text-muted-foreground">
                 {tableData.title ? tableData.title : '识别标题会显示在这里'}
               </div>
 
-              <div className="flex-1 overflow-auto rounded-xl border border-border bg-background/70">
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">行数：{totalRows}</Badge>
+                <Badge variant="secondary">列数：{totalColumns}</Badge>
+                <Badge variant="secondary">低置信度：{lowCount}</Badge>
+              </div>
+
+              <div className="table-shell flex-1 overflow-auto rounded-xl border border-border bg-background/70">
                 <Table>
                   <TableHeader>
                     <TableRow>

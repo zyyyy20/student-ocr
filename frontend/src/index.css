@@ -102,4 +102,25 @@
     opacity: 0.35;
     pointer-events: none;
   }
+
+  .fade-rise {
+    animation: fade-rise 500ms ease forwards;
+  }
+}
+
+@keyframes fade-rise {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade-rise {
+    animation: none;
+  }
 }
