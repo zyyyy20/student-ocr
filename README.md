@@ -59,6 +59,27 @@ python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 http://localhost:8000/
 ```
 
+## 前端开发（Vite）
+
+前端已迁移到 Vite + shadcn/ui，目录在 `frontend/`。
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+默认在 `http://localhost:5173/` 打开前端（已配置代理到后端）。
+
+## 前端构建（生产）
+
+```bash
+cd frontend
+npm run build
+```
+
+构建产物输出到 `frontend/dist/`，后端会自动读取并提供页面。
+
 ## 使用流程
 
 1. 打开页面 `http://localhost:8000/`
@@ -72,7 +93,7 @@ http://localhost:8000/
 ## 接口一览（开发/联调）
 
 - `GET /`：前端页面
-- `POST /upload`：上传文件并识别，返回 `{ headers, rows }`
+- `POST /upload`：上传文件并识别，返回 `{ headers, rows, title? }`
 - `POST /export`：接收前端编辑后的 JSON（含可选 `title`），生成 Excel，返回 `{ download_url }`
 - `GET /health`：健康检查
 

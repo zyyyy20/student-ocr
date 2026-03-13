@@ -25,6 +25,12 @@ Desktop.ini
 .vscode/
 .idea/
 
+# Node / Vite
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend-legacy/
+
 # OCR caches / models
 *.pdparams
 *.pdiparams

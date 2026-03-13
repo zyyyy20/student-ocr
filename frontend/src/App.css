@@ -1,0 +1,21 @@
+.app-shell {
+  background-image: radial-gradient(
+      circle at 20% 10%,
+      color-mix(in oklab, hsl(var(--accent)) 50%, transparent),
+      transparent 55%
+    ),
+    radial-gradient(
+      circle at 80% 0%,
+      color-mix(in oklab, hsl(var(--primary)) 30%, transparent),
+      transparent 60%
+    );
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+input[aria-invalid='true'] {
+  border-color: hsl(var(--destructive));
+  background: color-mix(in oklab, hsl(var(--destructive)) 5%, transparent);
+}

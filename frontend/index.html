@@ -2,101 +2,12 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>班级成绩单自动识别系统</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260312" />
   </head>
   <body>
-    <div class="app">
-      <header class="header">
-        <div class="header-top">
-          <div class="title">班级成绩单自动识别系统</div>
-          <div class="badges">
-            <span class="badge">CPU</span>
-            <span class="badge">多行表格</span>
-            <span class="badge">可编辑</span>
-          </div>
-        </div>
-        <div class="subtitle">上传班级成绩单（支持多行数据） → 自动识别 → 校对编辑 → 导出 Excel</div>
-      </header>
-
-      <main class="panels">
-        <section class="panel left">
-          <div class="card">
-            <div class="card-title">上传文件</div>
-            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="拖拽文件到此处或点击选择">
-              <div class="dz-title">拖拽文件到这里</div>
-              <div class="dz-sub">或点击选择 PNG / JPG / SVG / XLSX</div>
-              <div id="fileMeta" class="file-meta"></div>
-              <input id="fileInput" class="file-input" type="file" accept=".png,.jpg,.jpeg,.svg,.xlsx" />
-            </div>
-
-            <div class="upload-actions">
-              <button id="uploadBtn" class="btn primary" disabled>开始识别</button>
-              <button id="clearBtn" class="btn" disabled>清空</button>
-            </div>
-
-            <div class="threshold-row">
-              <label for="threshold">标红阈值</label>
-              <input id="threshold" type="range" min="0.5" max="0.99" step="0.01" value="0.85" />
-              <span id="thresholdValue" class="threshold-value">0.85</span>
-            </div>
-            <div id="status" class="status">请选择 PNG/JPG/SVG/XLSX 文件</div>
-          </div>
-
-          <div class="card">
-            <div class="card-title">原始文件预览</div>
-            <div id="preview" class="preview">
-              <div class="preview-placeholder">等待上传</div>
-            </div>
-          </div>
-        </section>
-
-        <section class="panel right">
-          <div class="card full-height">
-            <div class="card-title row">
-              <span>识别结果（可编辑）</span>
-              <div class="actions">
-                <div class="filter">
-                  <label for="riskColumn">高风险列</label>
-                  <select id="riskColumn">
-                    <option value="">全部列</option>
-                  </select>
-                </div>
-                <button id="addRowBtn" class="btn">添加行</button>
-                <button id="exportBtn" class="btn primary" disabled>导出 Excel</button>
-              </div>
-            </div>
-
-            <div id="resultTitle" class="result-title"></div>
-
-            <div class="table-wrap">
-              <table id="resultTable" class="table">
-                <thead id="thead">
-                  <tr>
-                    <th class="col-index">序号</th>
-                    <th>内容</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody id="tbody">
-                  <tr class="empty">
-                    <td colspan="3">尚无数据，请先上传并识别</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="hint">
-              低置信度（&lt; 阈值）的单元格会标红；手动编辑后默认置信度记为 1.00。
-              <span id="lowCount" class="low-count"></span>
-            </div>
-            <div id="download" class="download"></div>
-          </div>
-        </section>
-      </main>
-    </div>
-
-    <script src="/static/script.js?v=20260312"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

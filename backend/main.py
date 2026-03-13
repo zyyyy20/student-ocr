@@ -17,6 +17,9 @@ from backend.services.parser_service import FileParserService
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = BASE_DIR.parent
 FRONTEND_DIR = PROJECT_DIR / "frontend"
+FRONTEND_DIST = FRONTEND_DIR / "dist"
+FRONTEND_ASSETS = FRONTEND_DIST / "assets"
+FRONTEND_FAVICON = FRONTEND_DIST / "favicon.svg"
 EXPORT_DIR = BASE_DIR / "static" / "exports"
 
 
@@ -37,7 +40,8 @@ app.add_middleware(
 )
 
 app.mount("/downloads", StaticFiles(directory=str(EXPORT_DIR)), name="downloads")
-app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+if FRONTEND_ASSETS.exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_ASSETS)), name="assets")
 
 ocr_service = OCRService()
 excel_service = ExcelService(export_dir=EXPORT_DIR)
@@ -46,10 +50,22 @@ parser_service = FileParserService(ocr_service=ocr_service)
 
 @app.get("/")
 def index() -> FileResponse:
-    index_file = FRONTEND_DIR / "index.html"
+    if not FRONTEND_DIST.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="前端尚未构建：请在 frontend/ 运行 npm run build（或使用 npm run dev 访问 5173 端口）",
+        )
+    index_file = FRONTEND_DIST / "index.html"
     if not index_file.exists():
-        raise HTTPException(status_code=404, detail="前端资源不存在：请确认 frontend/index.html 已创建")
+        raise HTTPException(status_code=404, detail="前端资源不存在：请先构建前端（frontend/dist）")
     return FileResponse(str(index_file))
+
+
+@app.get("/favicon.svg")
+def favicon() -> FileResponse:
+    if FRONTEND_FAVICON.exists():
+        return FileResponse(str(FRONTEND_FAVICON))
+    raise HTTPException(status_code=404, detail="favicon.svg 未找到，请先构建前端")
 
 
 @app.post("/upload")
