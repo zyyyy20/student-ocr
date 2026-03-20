@@ -3,21 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>班级成绩单自动识别系统</title>
-    <link rel="stylesheet" href="/static/style.css?v=20260312" />
+    <title>学生成绩单自动识别系统</title>
+    <link rel="stylesheet" href="/static/style.css?v=20260320d" />
   </head>
   <body>
     <div class="app">
       <header class="header">
         <div class="header-top">
-          <div class="title">班级成绩单自动识别系统</div>
+          <div class="title">学生成绩单自动识别系统</div>
           <div class="badges">
             <span class="badge">CPU</span>
-            <span class="badge">多行表格</span>
+            <span class="badge">成绩表格</span>
             <span class="badge">可编辑</span>
           </div>
         </div>
-        <div class="subtitle">上传班级成绩单（支持多行数据） → 自动识别 → 校对编辑 → 导出 Excel</div>
+        <div class="subtitle">上传学生成绩单或班级成绩表 → 自动识别 → 校对编辑 → 导出 Excel</div>
       </header>
 
       <main class="panels">
@@ -46,8 +46,22 @@
 
           <div class="card">
             <div class="card-title">原始文件预览</div>
+            <div class="preview-mode-row">
+              <label for="previewMode">高亮模式</label>
+              <select id="previewMode">
+                <option value="original">原图反投影</option>
+                <option value="processed">预处理图高亮</option>
+              </select>
+            </div>
             <div id="preview" class="preview">
               <div class="preview-placeholder">等待上传</div>
+            </div>
+          </div>
+
+          <div id="processedPreviewCard" class="card processed-card hidden">
+            <div class="card-title">预处理后预览</div>
+            <div id="processedPreview" class="preview">
+              <div class="preview-placeholder">等待识别</div>
             </div>
           </div>
         </section>
@@ -69,6 +83,7 @@
             </div>
 
             <div id="resultTitle" class="result-title"></div>
+            <div id="resultMeta" class="meta-grid"></div>
 
             <div class="table-wrap">
               <table id="resultTable" class="table">
@@ -97,6 +112,6 @@
       </main>
     </div>
 
-    <script src="/static/script.js?v=20260312"></script>
+    <script src="/static/script.js?v=20260320d"></script>
   </body>
 </html>

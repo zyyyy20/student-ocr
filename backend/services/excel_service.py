@@ -7,7 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 
 class ExcelService:
@@ -36,10 +37,13 @@ class ExcelService:
 
         wb = Workbook()
         ws = wb.active
-        ws.title = "班级成绩单"
+        ws.title = "学生成绩单"
 
         bold = Font(bold=True)
         title_font = Font(bold=True, size=14)
+        header_fill = PatternFill("solid", fgColor="D9EAF7")
+        thin_side = Side(style="thin", color="B8C4CE")
+        cell_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
         row_offset = 0
 
         # 0. 写入标题（可选）
@@ -56,8 +60,8 @@ class ExcelService:
             cell = ws.cell(row=1 + row_offset, column=col_idx, value=str(header))
             cell.font = bold
             cell.alignment = Alignment(horizontal="center", vertical="center")
-            # 简单设置列宽
-            ws.column_dimensions[chr(64 + col_idx) if col_idx <= 26 else 'A'].width = 15
+            cell.fill = header_fill
+            cell.border = cell_border
 
         # 2. 写入数据行
         for row_idx, row_item in enumerate(rows, start=2 + row_offset):
@@ -71,13 +75,30 @@ class ExcelService:
                 # 尝试转数字以便 Excel 统计
                 num_val = self._parse_score(val)
                 final_val = num_val if num_val is not None else val
-                
-                ws.cell(row=row_idx, column=col_idx, value=final_val)
+
+                cell = ws.cell(row=row_idx, column=col_idx, value=final_val)
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                cell.border = cell_border
+
+        header_row = 1 + row_offset
+        ws.freeze_panes = f"A{header_row + 1}"
+        ws.auto_filter.ref = ws.dimensions
+        self._autosize_columns(ws, headers, rows)
 
         filename = f"class_transcript_{uuid.uuid4().hex}.xlsx"
         out_path = self.export_dir / filename
         wb.save(str(out_path))
         return filename
+
+    def _autosize_columns(self, ws, headers: List[Any], rows: List[Dict[str, Any]]) -> None:
+        for col_idx, header in enumerate(headers, start=1):
+            values = [str(header)]
+            for row in rows:
+                row_values = row.get("values", {})
+                if isinstance(row_values, dict):
+                    values.append(str(row_values.get(header, "")))
+            max_len = max((len(v) for v in values), default=10)
+            ws.column_dimensions[get_column_letter(col_idx)].width = min(max(12, max_len + 2), 30)
 
     @staticmethod
     def _parse_score(v: Any) -> Optional[float | int]:

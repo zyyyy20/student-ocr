@@ -74,6 +74,12 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
 @app.post("/export")
 def export(payload: Dict[str, Any] = Body(...)) -> JSONResponse:
     try:
+        headers = payload.get("headers", [])
+        rows = payload.get("rows", [])
+        if not isinstance(headers, list) or not all(isinstance(h, str) for h in headers):
+            raise HTTPException(status_code=400, detail="导出失败：headers 必须是字符串数组")
+        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+            raise HTTPException(status_code=400, detail="导出失败：rows 必须是对象数组")
         filename = excel_service.export_transcript(payload)
         return JSONResponse(content={"download_url": f"/downloads/{filename}"})
     except HTTPException:

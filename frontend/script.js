@@ -4,6 +4,9 @@ const uploadBtn = document.getElementById("uploadBtn");
 const clearBtn = document.getElementById("clearBtn");
 const statusEl = document.getElementById("status");
 const previewEl = document.getElementById("preview");
+const processedPreviewEl = document.getElementById("processedPreview");
+const processedPreviewCardEl = document.getElementById("processedPreviewCard");
+const previewModeSelect = document.getElementById("previewMode");
 const tbody = document.getElementById("tbody");
 const thead = document.getElementById("thead");
 const addRowBtn = document.getElementById("addRowBtn");
@@ -15,13 +18,24 @@ const fileMetaEl = document.getElementById("fileMeta");
 const lowCountEl = document.getElementById("lowCount");
 const riskColumnSelect = document.getElementById("riskColumn");
 const resultTitleEl = document.getElementById("resultTitle");
+const resultMetaEl = document.getElementById("resultMeta");
 
 let selectedFile = null;
-let currentHeaders = []; // 存储当前表格的表头 ["姓名", "成绩", ...]
+let currentHeaders = [];
 let threshold = Number(thresholdInput?.value ?? 0.85);
 let currentTitle = "";
+let currentMeta = {};
+let currentHeaderBoxes = {};
+let currentProcessedPreview = "";
+let currentHighlightShape = null;
+let previewMode = previewModeSelect?.value || "original";
 
-function setStatus(text, type) {
+let previewImageEl = null;
+let previewOverlayEl = null;
+let processedPreviewImageEl = null;
+let processedPreviewOverlayEl = null;
+
+function setStatus(text, type = "") {
   statusEl.textContent = text;
   statusEl.classList.remove("ok", "error");
   if (type) statusEl.classList.add(type);
@@ -29,21 +43,24 @@ function setStatus(text, type) {
 
 function setLoading(btn, loading) {
   if (!btn) return;
-  if (loading) btn.dataset.loading = "1";
-  else delete btn.dataset.loading;
+  if (loading) {
+    btn.dataset.loading = "1";
+  } else {
+    delete btn.dataset.loading;
+  }
 }
 
 function formatBytes(bytes) {
   const n = Number(bytes ?? 0);
   if (!Number.isFinite(n) || n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB"];
-  let v = n;
-  let i = 0;
-  while (v >= 1024 && i < units.length - 1) {
-    v /= 1024;
-    i += 1;
+  let value = n;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
   }
-  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
 }
 
 function setFileMeta(file) {
@@ -55,19 +72,277 @@ function setFileMeta(file) {
   fileMetaEl.textContent = `已选择：${file.name}（${formatBytes(file.size)}）`;
 }
 
+function syncPreviewModeUI() {
+  const hasProcessedPreview = Boolean(currentProcessedPreview);
+  if (processedPreviewCardEl) {
+    processedPreviewCardEl.classList.toggle(
+      "hidden",
+      !(previewMode === "processed" && hasProcessedPreview)
+    );
+  }
+}
+
 function refreshLowConfidenceSummary() {
   if (!lowCountEl) return;
-  const cells = document.querySelectorAll(".cell-editable.low");
-  const n = cells.length;
-  lowCountEl.textContent = n > 0 ? `（当前标红：${n} 个）` : "";
+  const count = document.querySelectorAll(".cell-editable.low").length;
+  lowCountEl.textContent = count > 0 ? `（当前标红：${count} 个）` : "";
 }
 
 function updateRowNumbers() {
   const rows = tbody.querySelectorAll("tr[data-row='1']");
-  rows.forEach((tr, idx) => {
+  rows.forEach((tr, index) => {
     const cell = tr.querySelector("td[data-col='__index__']");
-    if (cell) cell.textContent = String(idx + 1);
+    if (cell) cell.textContent = String(index + 1);
   });
+}
+
+function renderMeta(meta = {}) {
+  currentMeta = meta && typeof meta === "object" ? meta : {};
+  if (!resultMetaEl) return;
+
+  const entries = Object.entries(currentMeta).filter(([key, value]) => {
+    if (key === "标题") return false;
+    return String(value ?? "").trim() !== "";
+  });
+
+  if (entries.length === 0) {
+    resultMetaEl.innerHTML = "";
+    return;
+  }
+
+  resultMetaEl.innerHTML = entries
+    .map(
+      ([key, value]) => `
+        <div class="meta-item">
+          <span>${key}</span>
+          <strong>${String(value)}</strong>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function clearPreviewHighlight() {
+  currentHighlightShape = null;
+  if (previewOverlayEl) previewOverlayEl.innerHTML = "";
+  if (processedPreviewOverlayEl) processedPreviewOverlayEl.innerHTML = "";
+}
+
+function renderImagePreview(container, src, alt, onLoad) {
+  container.innerHTML = "";
+
+  const stage = document.createElement("div");
+  stage.className = "preview-stage";
+
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = alt;
+  if (onLoad) img.addEventListener("load", onLoad);
+
+  const overlay = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  overlay.classList.add("preview-overlay");
+
+  stage.appendChild(img);
+  stage.appendChild(overlay);
+  container.appendChild(stage);
+  return { img, overlay };
+}
+
+function renderPreview(file) {
+  previewEl.innerHTML = "";
+  previewImageEl = null;
+  previewOverlayEl = null;
+  clearPreviewHighlight();
+
+  if (!file) {
+    previewEl.innerHTML = `<div class="preview-placeholder">等待上传</div>`;
+    return;
+  }
+
+  const name = (file.name || "").toLowerCase();
+  const url = URL.createObjectURL(file);
+
+  if (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")) {
+    const rendered = renderImagePreview(previewEl, url, "原图预览", () => {
+      if (currentHighlightShape && previewMode === "original") {
+        showPreviewHighlight(currentHighlightShape);
+      }
+    });
+    previewImageEl = rendered.img;
+    previewOverlayEl = rendered.overlay;
+    return;
+  }
+
+  if (name.endsWith(".svg")) {
+    const obj = document.createElement("object");
+    obj.type = "image/svg+xml";
+    obj.data = url;
+    previewEl.appendChild(obj);
+    return;
+  }
+
+  if (name.endsWith(".xlsx")) {
+    previewEl.innerHTML = `<div class="preview-placeholder">XLSX 无法直接预览，将直接解析表格数据</div>`;
+    return;
+  }
+
+  previewEl.innerHTML = `<div class="preview-placeholder">暂不支持该文件预览</div>`;
+}
+
+function renderProcessedPreview(dataUrl) {
+  currentProcessedPreview = dataUrl || "";
+  if (!processedPreviewEl) return;
+
+  processedPreviewEl.innerHTML = "";
+  processedPreviewImageEl = null;
+  processedPreviewOverlayEl = null;
+
+  if (!dataUrl) {
+    processedPreviewEl.innerHTML = `<div class="preview-placeholder">等待识别</div>`;
+    syncPreviewModeUI();
+    return;
+  }
+
+  const rendered = renderImagePreview(processedPreviewEl, dataUrl, "预处理后预览", () => {
+    if (currentHighlightShape && previewMode === "processed") {
+      showPreviewHighlight(currentHighlightShape);
+    }
+  });
+  processedPreviewImageEl = rendered.img;
+  processedPreviewOverlayEl = rendered.overlay;
+  syncPreviewModeUI();
+}
+
+function drawPolygonOnPreview(targetContainer, targetImage, targetOverlay, points) {
+  const containerWidth = targetContainer.clientWidth;
+  const containerHeight = targetContainer.clientHeight;
+  const naturalWidth = targetImage.naturalWidth || 0;
+  const naturalHeight = targetImage.naturalHeight || 0;
+
+  if (!containerWidth || !containerHeight || !naturalWidth || !naturalHeight) {
+    targetOverlay.innerHTML = "";
+    return;
+  }
+
+  const scale = Math.min(containerWidth / naturalWidth, containerHeight / naturalHeight);
+  const displayWidth = naturalWidth * scale;
+  const displayHeight = naturalHeight * scale;
+  const offsetX = (containerWidth - displayWidth) / 2;
+  const offsetY = (containerHeight - displayHeight) / 2;
+
+  targetOverlay.setAttribute("viewBox", `0 0 ${containerWidth} ${containerHeight}`);
+  targetOverlay.setAttribute("width", `${containerWidth}`);
+  targetOverlay.setAttribute("height", `${containerHeight}`);
+  targetOverlay.innerHTML = "";
+
+  const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
+  const pointsAttr = points
+    .map((point) => `${offsetX + point.x * displayWidth},${offsetY + point.y * displayHeight}`)
+    .join(" ");
+  polygon.setAttribute("points", pointsAttr);
+  polygon.setAttribute("class", "preview-polygon");
+  targetOverlay.appendChild(polygon);
+}
+
+function showPreviewHighlight(shape) {
+  currentHighlightShape = shape || null;
+  if (previewOverlayEl) previewOverlayEl.innerHTML = "";
+  if (processedPreviewOverlayEl) processedPreviewOverlayEl.innerHTML = "";
+  if (!shape) return;
+
+  const targetImage = previewMode === "processed" ? processedPreviewImageEl : previewImageEl;
+  const targetOverlay = previewMode === "processed" ? processedPreviewOverlayEl : previewOverlayEl;
+  const targetContainer = previewMode === "processed" ? processedPreviewEl : previewEl;
+  const pointsKey = previewMode === "processed" ? "processed_points" : "points";
+  const points = Array.isArray(shape?.[pointsKey]) ? shape[pointsKey] : null;
+
+  if (!targetImage || !targetOverlay || !targetContainer || !points || points.length === 0) {
+    return;
+  }
+
+  drawPolygonOnPreview(targetContainer, targetImage, targetOverlay, points);
+}
+
+function applyLowConfidenceStyle(el, confidence) {
+  el.classList.remove("low");
+  if (confidence != null && confidence < threshold) {
+    el.classList.add("low");
+  }
+}
+
+function makeEditableCell(text, field, confidence, box) {
+  const span = document.createElement("span");
+  span.className = "cell-editable";
+  span.contentEditable = "true";
+  span.dataset.field = field;
+  span.dataset.confidence = String(confidence ?? 1);
+  if (box) span.dataset.box = JSON.stringify(box);
+  span.textContent = text ?? "";
+
+  span.addEventListener("input", () => {
+    span.dataset.confidence = "1";
+    applyLowConfidenceStyle(span, 1);
+    refreshLowConfidenceSummary();
+    updateRiskColumns({ preserveSelection: true });
+  });
+
+  applyLowConfidenceStyle(span, confidence);
+  return span;
+}
+
+function addRow(values = {}, confidences = {}, boxes = {}) {
+  const tr = document.createElement("tr");
+  tr.dataset.row = "1";
+
+  const tdIndex = document.createElement("td");
+  tdIndex.className = "col-index";
+  tdIndex.dataset.col = "__index__";
+  tdIndex.textContent = "1";
+  tr.appendChild(tdIndex);
+
+  for (const header of currentHeaders) {
+    const td = document.createElement("td");
+    td.dataset.col = header;
+    td.appendChild(
+      makeEditableCell(
+        String(values[header] ?? ""),
+        header,
+        Number(confidences[header] ?? 1),
+        boxes[header] ?? null
+      )
+    );
+    tr.appendChild(td);
+  }
+
+  const tdOp = document.createElement("td");
+  tdOp.dataset.col = "__action__";
+  const delBtn = document.createElement("button");
+  delBtn.className = "btn";
+  delBtn.textContent = "删除";
+  delBtn.addEventListener("click", () => {
+    tr.remove();
+    if (tbody.querySelectorAll("tr[data-row='1']").length === 0) {
+      const emptyRow = document.createElement("tr");
+      emptyRow.className = "empty";
+      emptyRow.innerHTML = `<td colspan="${currentHeaders.length + 2}">暂无数据</td>`;
+      tbody.appendChild(emptyRow);
+    }
+    refreshLowConfidenceSummary();
+    updateRowNumbers();
+    updateRiskColumns({ preserveSelection: true });
+    applyColumnFilter();
+  });
+  tdOp.appendChild(delBtn);
+  tr.appendChild(tdOp);
+
+  const empty = tbody.querySelector("tr.empty");
+  if (empty) empty.remove();
+
+  tbody.appendChild(tr);
+  refreshLowConfidenceSummary();
+  updateRowNumbers();
+  updateRiskColumns({ preserveSelection: true });
+  applyColumnFilter();
 }
 
 function clearTable() {
@@ -85,129 +360,29 @@ function clearTable() {
   `;
   currentHeaders = [];
   currentTitle = "";
+  currentMeta = {};
+  currentHeaderBoxes = {};
+  currentProcessedPreview = "";
   if (resultTitleEl) resultTitleEl.textContent = "";
+  if (resultMetaEl) resultMetaEl.innerHTML = "";
+  if (processedPreviewEl) {
+    processedPreviewEl.innerHTML = `<div class="preview-placeholder">等待识别</div>`;
+  }
+  processedPreviewImageEl = null;
+  processedPreviewOverlayEl = null;
+  syncPreviewModeUI();
+  clearPreviewHighlight();
   refreshLowConfidenceSummary();
   updateRiskColumns({ preserveSelection: false });
 }
 
-function renderPreview(file) {
-  previewEl.innerHTML = "";
-
-  if (!file) {
-    previewEl.innerHTML = `<div class="preview-placeholder">等待上传</div>`;
-    return;
-  }
-
-  const name = (file.name || "").toLowerCase();
-  const url = URL.createObjectURL(file);
-
-  if (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")) {
-    const img = document.createElement("img");
-    img.src = url;
-    img.alt = "预览";
-    previewEl.appendChild(img);
-    return;
-  }
-
-  if (name.endsWith(".svg")) {
-    const obj = document.createElement("object");
-    obj.type = "image/svg+xml";
-    obj.data = url;
-    previewEl.appendChild(obj);
-    return;
-  }
-
-  if (name.endsWith(".xlsx")) {
-    previewEl.innerHTML = `<div class="preview-placeholder">XLSX 无法直接预览，将直接解析表格数据</div>`;
-    return;
-  }
-
-  previewEl.innerHTML = `<div class="preview-placeholder">不支持预览</div>`;
-}
-
-function applyLowConfidenceStyle(el, conf) {
-  el.classList.remove("low");
-  if (conf != null && conf < threshold) el.classList.add("low");
-}
-
-function makeEditableCell(text, field, confidence) {
-  const span = document.createElement("span");
-  span.className = "cell-editable";
-  span.contentEditable = "true";
-  span.dataset.field = field;
-  span.dataset.confidence = String(confidence ?? 1);
-  span.textContent = text ?? "";
-
-  span.addEventListener("input", () => {
-    span.dataset.confidence = "1";
-    applyLowConfidenceStyle(span, 1);
-    refreshLowConfidenceSummary();
-  });
-
-  applyLowConfidenceStyle(span, confidence);
-  return span;
-}
-
-function addRow(values = {}, confidences = {}) {
-  const tr = document.createElement("tr");
-  tr.dataset.row = "1";
-
-  const tdIndex = document.createElement("td");
-  tdIndex.className = "col-index";
-  tdIndex.dataset.col = "__index__";
-  tdIndex.textContent = "1";
-  tr.appendChild(tdIndex);
-
-  // 根据 currentHeaders 生成对应的单元格
-  for (const header of currentHeaders) {
-    const td = document.createElement("td");
-    td.dataset.col = header;
-    const val = values[header] ?? "";
-    const conf = confidences[header] ?? 1.0;
-    
-    td.appendChild(makeEditableCell(String(val), header, Number(conf)));
-    tr.appendChild(td);
-  }
-
-  // 操作列
-  const tdOp = document.createElement("td");
-  tdOp.dataset.col = "__action__";
-  const delBtn = document.createElement("button");
-  delBtn.className = "btn";
-  delBtn.textContent = "删除";
-  delBtn.addEventListener("click", () => {
-    tr.remove();
-    if (tbody.querySelectorAll("tr[data-row='1']").length === 0) {
-      // 如果删完了，显示空提示，但不清空表头
-      const emptyRow = document.createElement("tr");
-      emptyRow.className = "empty";
-      const colSpan = currentHeaders.length + 1;
-      emptyRow.innerHTML = `<td colspan="${colSpan}">暂无数据</td>`;
-      tbody.appendChild(emptyRow);
-    }
-    refreshLowConfidenceSummary();
-    updateRowNumbers();
-    updateRiskColumns({ preserveSelection: true });
-  });
-  tdOp.appendChild(delBtn);
-  tr.appendChild(tdOp);
-
-  // 移除空提示行
-  const empty = tbody.querySelector("tr.empty");
-  if (empty) empty.remove();
-  
-  tbody.appendChild(tr);
-  refreshLowConfidenceSummary();
-  updateRowNumbers();
-  updateRiskColumns({ preserveSelection: true });
-  applyColumnFilter();
-}
-
 function renderTranscript(data) {
-  // data: { headers: [...], rows: [{values: {}, confidences: {}}, ...] }
   const headers = Array.isArray(data.headers) ? data.headers : [];
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const title = typeof data.title === "string" ? data.title.trim() : "";
+  const meta = data.meta && typeof data.meta === "object" ? data.meta : {};
+  const headerBoxes = data.header_boxes && typeof data.header_boxes === "object" ? data.header_boxes : {};
+  const processedPreview = typeof data.processed_preview === "string" ? data.processed_preview : "";
 
   if (headers.length === 0) {
     clearTable();
@@ -217,30 +392,31 @@ function renderTranscript(data) {
 
   currentHeaders = headers;
   currentTitle = title;
-  if (resultTitleEl) resultTitleEl.textContent = title || "";
+  currentHeaderBoxes = headerBoxes;
 
-  // 渲染表头
-  let thHtml = "";
-  thHtml += `<th class="col-index" data-col="__index__">序号</th>`;
-  for (const h of headers) {
-    thHtml += `<th data-col="${h}">${h}</th>`;
+  if (resultTitleEl) resultTitleEl.textContent = title || "";
+  renderMeta(meta);
+  renderProcessedPreview(processedPreview);
+
+  let thHtml = `<th class="col-index" data-col="__index__">序号</th>`;
+  for (const header of headers) {
+    const box = headerBoxes[header] ? ` data-box='${JSON.stringify(headerBoxes[header])}'` : "";
+    thHtml += `<th data-col="${header}"${box}>${header}</th>`;
   }
   thHtml += `<th data-col="__action__">操作</th>`;
   thead.innerHTML = `<tr>${thHtml}</tr>`;
 
-  // 渲染内容
   tbody.innerHTML = "";
   if (rows.length === 0) {
-    const colSpan = headers.length + 2;
-    tbody.innerHTML = `<tr class="empty"><td colspan="${colSpan}">未识别到数据行</td></tr>`;
+    tbody.innerHTML = `<tr class="empty"><td colspan="${headers.length + 2}">未识别到数据行</td></tr>`;
   } else {
     for (const row of rows) {
-      addRow(row.values, row.confidences);
+      addRow(row.values || {}, row.confidences || {}, row.boxes || {});
     }
   }
 
-  downloadEl.innerHTML = "";
   exportBtn.disabled = false;
+  downloadEl.innerHTML = "";
   refreshLowConfidenceSummary();
   updateRowNumbers();
   updateRiskColumns({ preserveSelection: false });
@@ -254,10 +430,9 @@ async function uploadFile(file) {
   const res = await fetch("/upload", { method: "POST", body: form });
   if (!res.ok) {
     const detail = await res.json().catch(() => null);
-    const msg = detail && detail.detail ? detail.detail : `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new Error(detail?.detail || `HTTP ${res.status}`);
   }
-  return await res.json();
+  return res.json();
 }
 
 async function exportExcel(payload) {
@@ -268,46 +443,33 @@ async function exportExcel(payload) {
   });
   if (!res.ok) {
     const detail = await res.json().catch(() => null);
-    const msg = detail && detail.detail ? detail.detail : `HTTP ${res.status}`;
-    throw new Error(msg);
+    throw new Error(detail?.detail || `HTTP ${res.status}`);
   }
-  return await res.json();
+  return res.json();
 }
 
 function buildPayloadFromUI() {
   const rows = [...tbody.querySelectorAll("tr[data-row='1']")];
-  const payloadRows = [];
-
-  for (const tr of rows) {
-    const values = {};
-    const confidences = {};
-    
-    // 遍历每一个可编辑的单元格
-    const editables = tr.querySelectorAll(".cell-editable");
-    editables.forEach(span => {
-      const field = span.dataset.field;
-      const conf = Number(span.dataset.confidence ?? 1);
-      values[field] = span.textContent.trim();
-      confidences[field] = conf;
-    });
-
-    payloadRows.push({
-      values,
-      confidences
-    });
-  }
-
   return {
     title: currentTitle,
+    meta: currentMeta,
     headers: currentHeaders,
-    rows: payloadRows
+    rows: rows.map((tr) => {
+      const values = {};
+      const confidences = {};
+      const boxes = {};
+      tr.querySelectorAll(".cell-editable").forEach((span) => {
+        const field = span.dataset.field;
+        values[field] = span.textContent.trim();
+        confidences[field] = Number(span.dataset.confidence ?? 1);
+        if (span.dataset.box) {
+          boxes[field] = JSON.parse(span.dataset.box);
+        }
+      });
+      return { values, confidences, boxes };
+    }),
   };
 }
-
-fileInput.addEventListener("change", () => {
-  const f = fileInput.files && fileInput.files[0] ? fileInput.files[0] : null;
-  setSelectedFile(f);
-});
 
 function isSupportedFile(file) {
   const name = (file?.name || "").toLowerCase();
@@ -329,122 +491,24 @@ function setSelectedFile(file) {
   setFileMeta(selectedFile);
   renderPreview(selectedFile);
   clearTable();
-  if (selectedFile) setStatus("已选择文件，点击“开始识别”进行处理", "");
-  else setStatus("请选择 PNG/JPG/SVG/XLSX 文件", "");
+  if (selectedFile) {
+    setStatus("已选择文件，点击“开始识别”进行处理");
+  } else {
+    setStatus("请选择 PNG/JPG/SVG/XLSX 文件");
+  }
 }
-
-dropzone?.addEventListener("click", () => fileInput.click());
-dropzone?.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" || e.key === " ") {
-    e.preventDefault();
-    fileInput.click();
-  }
-});
-
-dropzone?.addEventListener("dragover", (e) => {
-  e.preventDefault();
-  dropzone.classList.add("dragover");
-});
-dropzone?.addEventListener("dragleave", () => dropzone.classList.remove("dragover"));
-dropzone?.addEventListener("drop", (e) => {
-  e.preventDefault();
-  dropzone.classList.remove("dragover");
-  const f = e.dataTransfer?.files?.[0];
-  if (!f) return;
-  if (!isSupportedFile(f)) {
-    setSelectedFile(null);
-    setStatus("不支持的文件类型：仅支持 PNG/JPG/SVG/XLSX", "error");
-    return;
-  }
-  setSelectedFile(f);
-});
-
-clearBtn.addEventListener("click", () => {
-  fileInput.value = "";
-  setSelectedFile(null);
-});
-
-thresholdInput?.addEventListener("input", () => {
-  threshold = Number(thresholdInput.value);
-  if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
-  document.querySelectorAll(".cell-editable").forEach((el) => {
-    const conf = Number(el.dataset.confidence ?? 1);
-    applyLowConfidenceStyle(el, conf);
-  });
-  refreshLowConfidenceSummary();
-  updateRiskColumns({ preserveSelection: true });
-});
-
-uploadBtn.addEventListener("click", async () => {
-  if (!selectedFile) return;
-  uploadBtn.disabled = true;
-  clearBtn.disabled = true;
-  setLoading(uploadBtn, true);
-  setStatus("识别中，请稍候…（首次加载 OCR 模型可能较慢）", "");
-
-  try {
-    const data = await uploadFile(selectedFile);
-    renderTranscript(data);
-    setStatus("识别完成，可在右侧表格中修改后导出", "ok");
-  } catch (e) {
-    setStatus(`识别失败：${e.message || e}`, "error");
-    clearTable();
-    exportBtn.disabled = true;
-  } finally {
-    uploadBtn.disabled = false;
-    clearBtn.disabled = !selectedFile;
-    setLoading(uploadBtn, false);
-  }
-});
-
-addRowBtn.addEventListener("click", () => {
-  if (currentHeaders.length === 0) {
-    alert("请先上传文件并识别出表头结构后再添加行");
-    return;
-  }
-  addRow({}, {});
-});
-
-exportBtn.addEventListener("click", async () => {
-  exportBtn.disabled = true;
-  setLoading(exportBtn, true);
-  downloadEl.innerHTML = "";
-  setStatus("导出中…", "");
-
-  try {
-    const payload = buildPayloadFromUI();
-    const res = await exportExcel(payload);
-    const url = res.download_url;
-    if (!url) throw new Error("后端未返回下载链接");
-
-    downloadEl.innerHTML = `导出成功：<a href="${url}" target="_blank" rel="noopener">点击下载 Excel</a>`;
-    setStatus("导出完成", "ok");
-  } catch (e) {
-    setStatus(`导出失败：${e.message || e}`, "error");
-  } finally {
-    exportBtn.disabled = false;
-    setLoading(exportBtn, false);
-  }
-});
-
-renderPreview(null);
-clearTable();
-setFileMeta(null);
-if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
 
 function updateRiskColumns({ preserveSelection }) {
   if (!riskColumnSelect) return;
   const currentValue = riskColumnSelect.value;
   const counts = new Map();
 
-  currentHeaders.forEach((h) => counts.set(h, 0));
-  const rows = tbody.querySelectorAll("tr[data-row='1']");
-  rows.forEach((tr) => {
-    const cells = tr.querySelectorAll(".cell-editable");
-    cells.forEach((span) => {
+  currentHeaders.forEach((header) => counts.set(header, 0));
+  tbody.querySelectorAll("tr[data-row='1']").forEach((tr) => {
+    tr.querySelectorAll(".cell-editable").forEach((span) => {
       const field = span.dataset.field;
-      const conf = Number(span.dataset.confidence ?? 1);
-      if (field && conf < threshold) {
+      const confidence = Number(span.dataset.confidence ?? 1);
+      if (field && confidence < threshold) {
         counts.set(field, (counts.get(field) || 0) + 1);
       }
     });
@@ -457,31 +521,27 @@ function updateRiskColumns({ preserveSelection }) {
   options.sort((a, b) => b.count - a.count);
 
   riskColumnSelect.innerHTML = `<option value="">全部列</option>`;
-  options.forEach((opt) => {
-    const el = document.createElement("option");
-    el.value = opt.header;
-    el.textContent = `${opt.header}（${opt.count}）`;
-    riskColumnSelect.appendChild(el);
+  options.forEach((item) => {
+    const option = document.createElement("option");
+    option.value = item.header;
+    option.textContent = `${item.header}（${item.count}）`;
+    riskColumnSelect.appendChild(option);
   });
 
   if (preserveSelection && currentValue) {
-    const stillExists = [...riskColumnSelect.options].some((o) => o.value === currentValue);
-    riskColumnSelect.value = stillExists ? currentValue : "";
+    const exists = [...riskColumnSelect.options].some((option) => option.value === currentValue);
+    riskColumnSelect.value = exists ? currentValue : "";
   }
+
   applyColumnFilter();
 }
 
 function applyColumnFilter() {
   if (!riskColumnSelect) return;
   const target = riskColumnSelect.value;
-  const cols = document.querySelectorAll("[data-col]");
-  cols.forEach((el) => {
+  document.querySelectorAll("[data-col]").forEach((el) => {
     const col = el.dataset.col;
-    if (!target) {
-      el.classList.remove("col-hidden");
-      return;
-    }
-    if (col === "__index__" || col === "__action__" || col === target) {
+    if (!target || col === "__index__" || col === "__action__" || col === target) {
       el.classList.remove("col-hidden");
     } else {
       el.classList.add("col-hidden");
@@ -489,6 +549,145 @@ function applyColumnFilter() {
   });
 }
 
+fileInput?.addEventListener("change", () => {
+  const file = fileInput.files?.[0] || null;
+  setSelectedFile(file);
+});
+
+dropzone?.addEventListener("click", () => fileInput.click());
+dropzone?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter" || event.key === " ") {
+    event.preventDefault();
+    fileInput.click();
+  }
+});
+
+dropzone?.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  dropzone.classList.add("dragover");
+});
+
+dropzone?.addEventListener("dragleave", () => {
+  dropzone.classList.remove("dragover");
+});
+
+dropzone?.addEventListener("drop", (event) => {
+  event.preventDefault();
+  dropzone.classList.remove("dragover");
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  if (!isSupportedFile(file)) {
+    setSelectedFile(null);
+    setStatus("不支持的文件类型，仅支持 PNG/JPG/SVG/XLSX", "error");
+    return;
+  }
+  setSelectedFile(file);
+});
+
+clearBtn?.addEventListener("click", () => {
+  fileInput.value = "";
+  setSelectedFile(null);
+});
+
+thresholdInput?.addEventListener("input", () => {
+  threshold = Number(thresholdInput.value);
+  if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
+  document.querySelectorAll(".cell-editable").forEach((el) => {
+    applyLowConfidenceStyle(el, Number(el.dataset.confidence ?? 1));
+  });
+  refreshLowConfidenceSummary();
+  updateRiskColumns({ preserveSelection: true });
+});
+
+previewModeSelect?.addEventListener("change", () => {
+  previewMode = previewModeSelect.value || "original";
+  syncPreviewModeUI();
+  if (currentHighlightShape) {
+    showPreviewHighlight(currentHighlightShape);
+  } else {
+    clearPreviewHighlight();
+  }
+});
+
+uploadBtn?.addEventListener("click", async () => {
+  if (!selectedFile) return;
+  uploadBtn.disabled = true;
+  clearBtn.disabled = true;
+  setLoading(uploadBtn, true);
+  setStatus("识别中，请稍候（首次加载 OCR 模型可能较慢）");
+
+  try {
+    const data = await uploadFile(selectedFile);
+    renderTranscript(data);
+    setStatus("识别完成，可在右侧表格中修改后导出", "ok");
+  } catch (error) {
+    setStatus(`识别失败：${error.message || error}`, "error");
+    clearTable();
+    exportBtn.disabled = true;
+  } finally {
+    uploadBtn.disabled = false;
+    clearBtn.disabled = !selectedFile;
+    setLoading(uploadBtn, false);
+  }
+});
+
+addRowBtn?.addEventListener("click", () => {
+  if (currentHeaders.length === 0) {
+    alert("请先上传文件并识别出表头结构后再添加行");
+    return;
+  }
+  addRow({}, {}, {});
+});
+
+exportBtn?.addEventListener("click", async () => {
+  exportBtn.disabled = true;
+  setLoading(exportBtn, true);
+  downloadEl.innerHTML = "";
+  setStatus("导出中");
+
+  try {
+    const res = await exportExcel(buildPayloadFromUI());
+    if (!res.download_url) throw new Error("后端未返回下载链接");
+    downloadEl.innerHTML = `导出成功：<a href="${res.download_url}" target="_blank" rel="noopener">点击下载 Excel</a>`;
+    setStatus("导出完成", "ok");
+  } catch (error) {
+    setStatus(`导出失败：${error.message || error}`, "error");
+  } finally {
+    exportBtn.disabled = false;
+    setLoading(exportBtn, false);
+  }
+});
+
 riskColumnSelect?.addEventListener("change", () => {
   applyColumnFilter();
 });
+
+tbody?.addEventListener("click", (event) => {
+  const target = event.target.closest(".cell-editable");
+  if (!target) return;
+  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
+});
+
+tbody?.addEventListener("focusin", (event) => {
+  const target = event.target.closest(".cell-editable");
+  if (!target) return;
+  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
+});
+
+thead?.addEventListener("click", (event) => {
+  const target = event.target.closest("th[data-box]");
+  if (!target) return;
+  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
+});
+
+window.addEventListener("resize", () => {
+  if (currentHighlightShape) {
+    showPreviewHighlight(currentHighlightShape);
+  }
+});
+
+renderPreview(null);
+clearTable();
+setFileMeta(null);
+if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
+syncPreviewModeUI();

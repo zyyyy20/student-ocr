@@ -45,6 +45,8 @@ class OCRService:
         self._title_max_rows = 3
         self._title_max_chars = 12
         self._title_min_width_ratio = 0.35
+        self._document_min_area_ratio = 0.35
+        self._cell_min_size = 12
 
     @staticmethod
     def _create_with_compat(factory, kwargs: Dict[str, Any]):
@@ -109,46 +111,133 @@ class OCRService:
         - 对较小截图放大，提高字符可分辨率（如 99->9 的问题）
         - 对轻微倾斜做纠偏，提升表格与文本稳定性
         """
+        return self.preprocess_with_context(image_bgr)["image"]
+
+    def preprocess_with_context(self, image_bgr: np.ndarray) -> Dict[str, Any]:
+        if image_bgr is None:
+            return {"image": image_bgr, "context": None}
+
+        alpha = None
+        if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 4:
+            alpha = image_bgr[:, :, 3].copy()
+
+        image_bgr = self._normalize_input_image(image_bgr)
+        original_h, original_w = image_bgr.shape[:2]
+        transform = self._identity_transform()
+
+        # 透明背景截图大多只是旋转，不是透视拍照；此时跳过透视校正，避免反投影失真。
+        if alpha is None:
+            quad = self._detect_document_quad(image_bgr)
+            if quad is not None:
+                image_bgr, matrix = self._perspective_correct_with_matrix(image_bgr, quad)
+                transform = matrix @ transform
+
+        image_bgr, deskew_matrix = self._deskew_rotate_with_matrix(image_bgr, alpha_mask=alpha)
+        transform = deskew_matrix @ transform
+
+        image_bgr, crop_matrix = self._crop_to_table_or_title_with_matrix(image_bgr)
+        transform = crop_matrix @ transform
+
+        image_bgr, enhance_matrix = self._enhance_for_ocr_with_matrix(image_bgr)
+        transform = enhance_matrix @ transform
+
+        processed_h, processed_w = image_bgr.shape[:2]
+        context = {
+            "forward_matrix": transform,
+            "inverse_matrix": np.linalg.inv(transform),
+            "original_size": {"width": int(original_w), "height": int(original_h)},
+            "processed_size": {"width": int(processed_w), "height": int(processed_h)},
+        }
+        return {"image": image_bgr, "context": context}
+
+    def debug_preprocess(self, image_bgr: np.ndarray) -> Dict[str, np.ndarray]:
+        if image_bgr is None:
+            return {}
+
+        stages: Dict[str, np.ndarray] = {}
+        normalized = self._normalize_input_image(image_bgr)
+        stages["01_normalized"] = normalized.copy()
+
+        corrected = normalized
+        quad = self._detect_document_quad(normalized)
+        if quad is not None:
+            corrected = self._perspective_correct(normalized, quad)
+        stages["02_perspective"] = corrected.copy()
+
+        deskewed = self._deskew_rotate(corrected)
+        stages["03_deskew"] = deskewed.copy()
+
+        cropped = self._crop_to_table_or_title(deskewed)
+        stages["04_cropped"] = cropped.copy()
+
+        enhanced = self._enhance_for_ocr(cropped)
+        stages["05_enhanced"] = enhanced.copy()
+
+        try:
+            gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+            stages["06_table_binary"] = self._binarize_for_table(gray)
+        except Exception:
+            pass
+
+        return stages
+
+    @staticmethod
+    def _identity_transform() -> np.ndarray:
+        return np.eye(3, dtype=np.float32)
+
+    def _normalize_input_image(self, image_bgr: np.ndarray) -> np.ndarray:
         if image_bgr is None:
             return image_bgr
-
-        # 若包含透明通道，先用 alpha 掩膜估计角度，再合成白底
-        did_alpha_deskew = False
         if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 4:
             bgr = image_bgr[:, :, :3]
             alpha = image_bgr[:, :, 3]
-            angle = self._estimate_skew_min_area(alpha)
-            image_bgr = self._alpha_composite_white(bgr, alpha)
-            if angle is not None and abs(angle) >= self._deskew_min_abs_angle:
-                image_bgr = self._rotate_with_padding(image_bgr, angle, pad=self._deskew_pad)
-                did_alpha_deskew = True
-        elif len(image_bgr.shape) == 2:
-            image_bgr = cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+            return self._alpha_composite_white(bgr, alpha)
+        if len(image_bgr.shape) == 2:
+            return cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
+        return image_bgr
 
-        # 1) 倾斜纠偏（对轻微旋转的截图更稳定）
-        if not did_alpha_deskew:
-            paper_mask = self._extract_paper_mask(image_bgr)
-            angle = None
-            if paper_mask is not None:
-                angle = self._estimate_skew_paper(paper_mask)
-                if angle is not None and abs(angle) < self._deskew_min_abs_angle:
-                    angle = None
-            if angle is None:
-                angle = self._estimate_skew_angle(image_bgr)
-            if angle is not None and abs(angle) >= self._deskew_min_abs_angle:
-                image_bgr = self._rotate_with_padding(image_bgr, angle, pad=self._deskew_pad)
-                # 旋转后再尝试裁切到纸面区域
-                paper_mask_after = self._extract_paper_mask(image_bgr)
-                image_bgr = self._crop_to_paper(image_bgr, paper_mask_after)
+    def _deskew_rotate(self, image_bgr: np.ndarray) -> np.ndarray:
+        image_bgr, _matrix = self._deskew_rotate_with_matrix(image_bgr)
+        return image_bgr
 
-        # 2) 尝试裁切表格/标题区域（避免大标题干扰）
-        image_bgr = self._crop_to_table_or_title(image_bgr)
+    def _deskew_rotate_with_matrix(
+        self, image_bgr: np.ndarray, alpha_mask: Optional[np.ndarray] = None
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        transform = self._identity_transform()
+        angle = None
 
-        # 3) 小图增强（加白边 + 放大）
+        if alpha_mask is not None:
+            angle = self._estimate_skew_min_area(alpha_mask)
+            if angle is not None and abs(angle) < self._deskew_min_abs_angle:
+                angle = None
+
+        paper_mask = self._extract_paper_mask(image_bgr) if alpha_mask is None else None
+        if angle is None and paper_mask is not None:
+            angle = self._estimate_skew_paper(paper_mask)
+            if angle is not None and abs(angle) < self._deskew_min_abs_angle:
+                angle = None
+        if angle is None:
+            angle = self._estimate_skew_angle(image_bgr)
+        if angle is not None and abs(angle) >= self._deskew_min_abs_angle:
+            image_bgr, rotate_matrix = self._rotate_with_padding_with_matrix(
+                image_bgr, angle, pad=self._deskew_pad
+            )
+            transform = rotate_matrix @ transform
+            paper_mask_after = self._extract_paper_mask(image_bgr)
+            crop_bbox = self._safe_crop_bbox_from_mask(image_bgr, paper_mask_after)
+            if crop_bbox is not None:
+                image_bgr, crop_matrix = self._crop_by_bbox(image_bgr, crop_bbox)
+                transform = crop_matrix @ transform
+        return image_bgr, transform
+
+    def _enhance_for_ocr(self, image_bgr: np.ndarray) -> np.ndarray:
+        image_bgr, _matrix = self._enhance_for_ocr_with_matrix(image_bgr)
+        return image_bgr
+
+    def _enhance_for_ocr_with_matrix(self, image_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         h, w = image_bgr.shape[:2]
         if min(h, w) >= self._small_image_min_side:
-            return image_bgr
-
+            return image_bgr, self._identity_transform()
         padded = cv2.copyMakeBorder(
             image_bgr,
             self._small_image_pad,
@@ -165,7 +254,86 @@ class OCRService:
             fy=self._small_image_scale,
             interpolation=cv2.INTER_CUBIC,
         )
-        return scaled
+        matrix = np.array(
+            [
+                [self._small_image_scale, 0, self._small_image_scale * self._small_image_pad],
+                [0, self._small_image_scale, self._small_image_scale * self._small_image_pad],
+                [0, 0, 1],
+            ],
+            dtype=np.float32,
+        )
+        return scaled, matrix
+
+    def _detect_document_quad(self, image_bgr: np.ndarray) -> Optional[np.ndarray]:
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 50, 150)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        h, w = gray.shape[:2]
+        min_area = h * w * self._document_min_area_ratio
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:10]:
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+            if len(approx) != 4:
+                continue
+            area = cv2.contourArea(approx)
+            if area < min_area:
+                continue
+            return approx.reshape(4, 2).astype(np.float32)
+        return None
+
+    @staticmethod
+    def _order_quad_points(pts: np.ndarray) -> np.ndarray:
+        rect = np.zeros((4, 2), dtype=np.float32)
+        s = pts.sum(axis=1)
+        diff = np.diff(pts, axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        return rect
+
+    def _perspective_correct(self, image_bgr: np.ndarray, quad: np.ndarray) -> np.ndarray:
+        image_bgr, _matrix = self._perspective_correct_with_matrix(image_bgr, quad)
+        return image_bgr
+
+    def _perspective_correct_with_matrix(
+        self, image_bgr: np.ndarray, quad: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        rect = self._order_quad_points(quad)
+        tl, tr, br, bl = rect
+        width_a = np.linalg.norm(br - bl)
+        width_b = np.linalg.norm(tr - tl)
+        height_a = np.linalg.norm(tr - br)
+        height_b = np.linalg.norm(tl - bl)
+        max_width = int(max(width_a, width_b))
+        max_height = int(max(height_a, height_b))
+        if max_width < 50 or max_height < 50:
+            return image_bgr
+
+        dst = np.array(
+            [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(rect, dst)
+        corrected = cv2.warpPerspective(
+            image_bgr,
+            matrix,
+            (max_width, max_height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(255, 255, 255),
+        )
+        return corrected, matrix
 
     def _estimate_skew_angle(self, image_bgr: np.ndarray) -> Optional[float]:
         """
@@ -366,12 +534,22 @@ class OCRService:
 
     @staticmethod
     def _crop_to_paper(image_bgr: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
-        if image_bgr is None or mask is None:
+        crop_bbox = OCRService._safe_crop_bbox_from_mask(image_bgr, mask)
+        if crop_bbox is None:
             return image_bgr
+        cropped, _matrix = OCRService._crop_by_bbox(image_bgr, crop_bbox)
+        return cropped
+
+    @staticmethod
+    def _safe_crop_bbox_from_mask(
+        image_bgr: np.ndarray, mask: Optional[np.ndarray]
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if image_bgr is None or mask is None:
+            return None
 
         ys, xs = np.where(mask > 0)
         if len(xs) < 200:
-            return image_bgr
+            return None
 
         x1, x2 = int(xs.min()), int(xs.max())
         y1, y2 = int(ys.min()), int(ys.max())
@@ -379,11 +557,11 @@ class OCRService:
         box_w = x2 - x1 + 1
         box_h = y2 - y1 + 1
         if box_w <= 0 or box_h <= 0:
-            return image_bgr
+            return None
 
         # 过于激进的裁切容易丢列，设置保守阈值
         if (box_w / w) < 0.8 or (box_h / h) < 0.8 or (box_w * box_h) < (0.6 * w * h):
-            return image_bgr
+            return None
 
         pad = 30
         x1 = max(0, x1 - pad)
@@ -391,31 +569,42 @@ class OCRService:
         x2 = min(w - 1, x2 + pad)
         y2 = min(h - 1, y2 + pad)
         if x2 <= x1 or y2 <= y1:
-            return image_bgr
+            return None
+        return x1, y1, x2, y2
 
-        return image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+    @staticmethod
+    def _crop_by_bbox(
+        image_bgr: np.ndarray, bbox: Tuple[int, int, int, int]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        x1, y1, x2, y2 = bbox
+        cropped = image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+        matrix = np.array([[1, 0, -x1], [0, 1, -y1], [0, 0, 1]], dtype=np.float32)
+        return cropped, matrix
 
     def _crop_to_table_or_title(self, image_bgr: np.ndarray) -> np.ndarray:
+        image_bgr, _matrix = self._crop_to_table_or_title_with_matrix(image_bgr)
+        return image_bgr
+
+    def _crop_to_table_or_title_with_matrix(self, image_bgr: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         优先裁切表格区域；若无法检测表格区域，则尝试裁切掉顶部标题。
         """
         if image_bgr is None:
-            return image_bgr
+            return image_bgr, self._identity_transform()
 
         # 1) 表格区域（基于水平/垂直线的交叉区域）
         table_box = self._estimate_table_bbox(image_bgr)
         if table_box is not None:
-            x1, y1, x2, y2 = table_box
-            return image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+            return self._crop_by_bbox(image_bgr, table_box)
 
         # 2) 标题裁切（基于文本行高度/位置）
         title_crop = self._estimate_title_crop_y(image_bgr)
         if title_crop is not None:
             h, w = image_bgr.shape[:2]
             y = min(max(0, title_crop), h - 1)
-            return image_bgr[y:, :]
+            return self._crop_by_bbox(image_bgr, (0, y, w - 1, h - 1))
 
-        return image_bgr
+        return image_bgr, self._identity_transform()
 
     def _estimate_table_bbox(self, image_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
         """
@@ -427,23 +616,11 @@ class OCRService:
             return None
 
         # 二值化强调表格线
-        bw = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10
-        )
+        bw = self._binarize_for_table(gray)
         h, w = bw.shape[:2]
 
         # 检测水平/垂直线
-        horiz = cv2.morphologyEx(
-            bw,
-            cv2.MORPH_OPEN,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 25), 1)),
-        )
-        vert = cv2.morphologyEx(
-            bw,
-            cv2.MORPH_OPEN,
-            cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 25))),
-        )
-        grid = cv2.bitwise_or(horiz, vert)
+        _horiz, _vert, grid = self._extract_grid_lines(bw)
 
         contours, _ = cv2.findContours(grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
@@ -460,6 +637,156 @@ class OCRService:
         x2 = min(w - 1, x + ww + pad)
         y2 = min(h - 1, y + hh + pad)
         return x1, y1, x2, y2
+
+    @staticmethod
+    def _binarize_for_table(gray: np.ndarray) -> np.ndarray:
+        return cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 15, 10
+        )
+
+    def _extract_grid_lines(self, binary: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        h, w = binary.shape[:2]
+        horiz = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (max(10, w // 25), 1)),
+        )
+        vert = cv2.morphologyEx(
+            binary,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(10, h // 25))),
+        )
+        horiz = self._filter_line_components(
+            horiz,
+            axis="horizontal",
+            min_long_side=max(20, int(w * 0.18)),
+            max_short_side=max(6, h // 12),
+        )
+        vert = self._filter_line_components(
+            vert,
+            axis="vertical",
+            min_long_side=max(28, int(h * 0.35)),
+            max_short_side=max(6, w // 12),
+        )
+        grid = cv2.bitwise_or(horiz, vert)
+        return horiz, vert, grid
+
+    @staticmethod
+    def _filter_line_components(
+        mask: np.ndarray, *, axis: str, min_long_side: int, max_short_side: int
+    ) -> np.ndarray:
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return mask
+
+        filtered = np.zeros_like(mask)
+        for contour in contours:
+            x, y, w, h = cv2.boundingRect(contour)
+            long_side = w if axis == "horizontal" else h
+            short_side = h if axis == "horizontal" else w
+            if long_side < min_long_side:
+                continue
+            if short_side > max_short_side:
+                continue
+            cv2.drawContours(filtered, [contour], -1, 255, thickness=-1)
+        return filtered
+
+    def _grid_mask_to_cells(self, grid_mask: np.ndarray) -> Optional[List[Tuple[int, int, int, int]]]:
+        inv = cv2.bitwise_not(grid_mask)
+        contours, hierarchy = cv2.findContours(inv, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        if contours is None or hierarchy is None:
+            return None
+
+        h, w = grid_mask.shape[:2]
+        cells: List[Tuple[int, int, int, int]] = []
+        for contour in contours:
+            x, y, ww, hh = cv2.boundingRect(contour)
+            if ww < self._cell_min_size or hh < self._cell_min_size:
+                continue
+            if ww > w * 0.95 and hh > h * 0.95:
+                continue
+            if ww * hh > (w * h * 0.35):
+                continue
+            cells.append((x, y, ww, hh))
+
+        return cells if len(cells) >= 4 else None
+
+    def _line_cells_to_grid(
+        self, cells: Sequence[Tuple[int, int, int, int]], items: Sequence[OCRItem]
+    ) -> Optional[List[List[str]]]:
+        if not cells:
+            return None
+
+        sorted_cells = sorted(cells, key=lambda c: (c[1], c[0]))
+        heights = sorted(c[3] for c in sorted_cells)
+        med_h = heights[len(heights) // 2] if heights else 20
+        row_tol = max(10.0, med_h * 0.6)
+
+        row_centers: List[float] = []
+        rows: List[List[Tuple[int, int, int, int]]] = []
+        for cell in sorted_cells:
+            x, y, ww, hh = cell
+            yc = y + hh / 2.0
+            placed = False
+            for idx, center in enumerate(row_centers):
+                if abs(yc - center) <= row_tol:
+                    rows[idx].append(cell)
+                    row_centers[idx] = (row_centers[idx] * 0.7) + (yc * 0.3)
+                    placed = True
+                    break
+            if not placed:
+                row_centers.append(yc)
+                rows.append([cell])
+
+        for row in rows:
+            row.sort(key=lambda c: c[0])
+
+        if len(rows) < 2 or max((len(row) for row in rows), default=0) < 2:
+            return None
+
+        grid: List[List[str]] = []
+        for row in rows:
+            line: List[str] = []
+            for x, y, ww, hh in row:
+                line.append(self._collect_text_in_rect(items, x, y, x + ww, y + hh))
+            if any(cell.strip() for cell in line):
+                grid.append(line)
+
+        return grid if len(grid) >= 2 else None
+
+    @staticmethod
+    def _line_dominance(mask: np.ndarray, *, axis: str) -> float:
+        if mask is None or mask.size == 0:
+            return 0.0
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return 0.0
+
+        h, w = mask.shape[:2]
+        target_span = h if axis == "vertical" else w
+        spans: List[float] = []
+        for contour in contours:
+            x, y, ww, hh = cv2.boundingRect(contour)
+            span = hh if axis == "vertical" else ww
+            spans.append(span / max(1.0, float(target_span)))
+        return float(max(spans)) if spans else 0.0
+
+    def _collect_text_in_rect(
+        self, items: Sequence[OCRItem], x1: int, y1: int, x2: int, y2: int
+    ) -> str:
+        matches: List[Tuple[float, str]] = []
+        for item in items:
+            bb = self._xyxy(item.box)
+            if not bb:
+                continue
+            ix1, iy1, ix2, iy2 = bb
+            cx = (ix1 + ix2) / 2.0
+            cy = (iy1 + iy2) / 2.0
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                matches.append((cx, item.text))
+
+        matches.sort(key=lambda t: t[0])
+        return " ".join(text.strip() for _, text in matches if text.strip()).strip()
 
     def _estimate_title_crop_y(self, image_bgr: np.ndarray) -> Optional[int]:
         """
@@ -552,6 +879,13 @@ class OCRService:
 
     @staticmethod
     def _rotate_with_padding(image: np.ndarray, angle: float, pad: int = 20) -> np.ndarray:
+        rotated, _matrix = OCRService._rotate_with_padding_with_matrix(image, angle, pad)
+        return rotated
+
+    @staticmethod
+    def _rotate_with_padding_with_matrix(
+        image: np.ndarray, angle: float, pad: int = 20
+    ) -> Tuple[np.ndarray, np.ndarray]:
         padded = cv2.copyMakeBorder(
             image,
             pad,
@@ -572,7 +906,9 @@ class OCRService:
             borderMode=cv2.BORDER_CONSTANT,
             borderValue=(180, 180, 180),
         )
-        return rotated
+        pad_matrix = np.array([[1, 0, pad], [0, 1, pad], [0, 0, 1]], dtype=np.float32)
+        rotate_matrix = np.vstack([m, [0, 0, 1]]).astype(np.float32)
+        return rotated, rotate_matrix @ pad_matrix
 
     @staticmethod
     def _alpha_composite_white(bgr: np.ndarray, alpha: np.ndarray) -> np.ndarray:
@@ -693,16 +1029,37 @@ class OCRService:
         if preprocess:
             image_bgr = self.preprocess_image(image_bgr)
 
-        # 1) 轻量路径：OCR 检测框聚类重建表格
+        # 1) 截图类场景优先走 OCR 聚类；只有表格线贯穿度足够高时才启用线结构恢复
         if ocr_items is None:
             ocr_items = self.recognize_text(image_bgr, preprocess=False)
 
         grid_from_items = self._items_to_grid(ocr_items)
         score_items = self._grid_score(grid_from_items)
+
+        grid_from_lines = None
+        score_lines = 0
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            bw = self._binarize_for_table(gray)
+            horiz, vert, grid_mask = self._extract_grid_lines(bw)
+            vertical_dominance = self._line_dominance(vert, axis="vertical")
+            horizontal_dominance = self._line_dominance(horiz, axis="horizontal")
+            line_confident = vertical_dominance >= 0.65 and horizontal_dominance >= 0.45
+            cells = self._grid_mask_to_cells(grid_mask) if line_confident else None
+            if cells and score_items < 40:
+                grid_from_lines = self._line_cells_to_grid(cells, ocr_items)
+                score_lines = self._grid_score(grid_from_lines)
+                if score_lines > score_items and score_lines >= 20:
+                    return grid_from_lines
+        except Exception:
+            grid_from_lines = None
+            score_lines = 0
+
+        # 2) 轻量路径：OCR 检测框聚类重建表格
         if score_items >= 20:
             return grid_from_items
 
-        # 2) 重路径：PaddleX TableRecognition
+        # 3) 重路径：PaddleX TableRecognition
         try:
             engine = self._get_table_engine()
             # pipeline.predict 既支持图片路径，也支持 ndarray；这里直接传 ndarray
@@ -713,12 +1070,13 @@ class OCRService:
                 if html:
                     grid_from_html = self._html_table_to_grid(html)
                     score_html = self._grid_score(grid_from_html)
-                    if score_html > score_items:
+                    if score_html > max(score_items, score_lines):
                         return grid_from_html
         except Exception:
             pass
 
-        return grid_from_items if grid_from_items and len(grid_from_items) >= 2 else None
+        best_grid = grid_from_items if score_items >= score_lines else grid_from_lines
+        return best_grid if best_grid and len(best_grid) >= 2 else None
 
     @staticmethod
     def _coerce_box(raw: Any) -> List[List[float]]:
@@ -864,6 +1222,34 @@ class OCRService:
             if abs(inum - qnum) < 1e-6:
                 best = max(best or 0.0, float(it.confidence))
         return best
+
+    @staticmethod
+    def best_match_box(query: str, items: Sequence[OCRItem]) -> Optional[List[List[float]]]:
+        qn = OCRService.normalize_text(query)
+        if not qn:
+            return None
+
+        exact_match: Optional[OCRItem] = None
+        for it in items:
+            if OCRService.normalize_text(it.text) == qn:
+                if exact_match is None or it.confidence > exact_match.confidence:
+                    exact_match = it
+        if exact_match is not None:
+            return exact_match.box
+
+        qnum = OCRService._extract_number(qn)
+        if qnum is None:
+            return None
+
+        numeric_match: Optional[OCRItem] = None
+        for it in items:
+            inum = OCRService._extract_number(OCRService.normalize_text(it.text))
+            if inum is None:
+                continue
+            if abs(inum - qnum) < 1e-6:
+                if numeric_match is None or it.confidence > numeric_match.confidence:
+                    numeric_match = it
+        return numeric_match.box if numeric_match is not None else None
 
     @staticmethod
     def _extract_number(s: str) -> Optional[float]:
