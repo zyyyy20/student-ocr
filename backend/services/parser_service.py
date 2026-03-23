@@ -73,6 +73,14 @@ class FileParserService:
         # 先做一次文本 OCR（后续置信度匹配、表格重建都复用）
         ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
         meta = self._extract_transcript_meta(ocr_items)
+        image_bgr, transform_context, focused = self._focus_table_region(
+            image_bgr,
+            ocr_items,
+            transform_context,
+        )
+        if focused:
+            ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
+            meta = self._extract_transcript_meta(ocr_items)
 
         table = None
         try:
@@ -83,6 +91,7 @@ class FileParserService:
         if table and len(table) >= 2:
             result = self._extract_class_grid(
                 table,
+                image_bgr=image_bgr,
                 ocr_items=ocr_items,
                 default_conf=0.85,
                 image_size=image_size,
@@ -111,6 +120,80 @@ class FileParserService:
         if not ok:
             return ""
         return f"data:image/png;base64,{base64.b64encode(buf.tobytes()).decode('ascii')}"
+
+    def _focus_table_region(
+        self,
+        image_bgr: np.ndarray,
+        ocr_items: Sequence[OCRItem],
+        transform_context: Optional[Dict[str, Any]],
+    ) -> Tuple[np.ndarray, Optional[Dict[str, Any]], bool]:
+        bbox = self._estimate_focus_bbox(image_bgr, ocr_items)
+        if bbox is None:
+            return image_bgr, transform_context, False
+
+        x1, y1, x2, y2 = bbox
+        cropped = image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+        if cropped.size == 0:
+            return image_bgr, transform_context, False
+
+        if transform_context is None:
+            return cropped, transform_context, True
+
+        crop_matrix = np.array([[1, 0, -x1], [0, 1, -y1], [0, 0, 1]], dtype=np.float32)
+        forward_matrix = crop_matrix @ np.array(transform_context["forward_matrix"], dtype=np.float32)
+        new_context = {
+            "forward_matrix": forward_matrix,
+            "inverse_matrix": np.linalg.inv(forward_matrix),
+            "original_size": transform_context["original_size"],
+            "processed_size": {"width": int(cropped.shape[1]), "height": int(cropped.shape[0])},
+        }
+        return cropped, new_context, True
+
+    def _estimate_focus_bbox(
+        self,
+        image_bgr: np.ndarray,
+        ocr_items: Sequence[OCRItem],
+    ) -> Optional[Tuple[int, int, int, int]]:
+        if image_bgr is None or not ocr_items:
+            return None
+
+        h, w = image_bgr.shape[:2]
+        footer_keywords = ("班主任", "老师", "日期", "年月日")
+        candidates: List[Tuple[float, float, float, float]] = []
+        footer_top: Optional[float] = None
+
+        for item in ocr_items:
+            box = self.ocr_service._xyxy(item.box)
+            if not box:
+                continue
+            x1, y1, x2, y2 = box
+            text = str(item.text or "").strip()
+            if any(keyword in text for keyword in footer_keywords):
+                footer_top = y1 if footer_top is None else min(footer_top, y1)
+                continue
+            if (x2 - x1) * (y2 - y1) < 60:
+                continue
+            candidates.append((x1, y1, x2, y2))
+
+        if len(candidates) < 6:
+            return None
+
+        xs1 = [b[0] for b in candidates]
+        ys1 = [b[1] for b in candidates]
+        xs2 = [b[2] for b in candidates]
+        ys2 = [b[3] for b in candidates]
+        x1 = max(0, int(np.percentile(xs1, 3)) - 24)
+        y1 = max(0, int(np.percentile(ys1, 2)) - 24)
+        x2 = min(w - 1, int(max(xs2)) + 44)
+        y2 = min(h - 1, int(np.percentile(ys2, 97)) + 40)
+
+        if footer_top is not None and footer_top > h * 0.6:
+            y2 = min(y2, int(footer_top) - 12)
+
+        if (x2 - x1) < w * 0.35 or (y2 - y1) < h * 0.2:
+            return None
+
+        return x1, y1, x2, y2
 
     def _parse_svg(self, data: bytes) -> Dict[str, Any]:
         # 1) 优先解析 SVG 文本节点
@@ -147,7 +230,13 @@ class FileParserService:
             if any(c for c in row):
                 rows.append(row)
         
-        result = self._extract_class_grid(rows, ocr_items=[], default_conf=1.0, image_size=None)
+        result = self._extract_class_grid(
+            rows,
+            image_bgr=None,
+            ocr_items=[],
+            default_conf=1.0,
+            image_size=None,
+        )
         result.setdefault("meta", {})
         return result
 
@@ -200,6 +289,7 @@ class FileParserService:
         self,
         grid: List[List[str]],
         *,
+        image_bgr: Optional[np.ndarray] = None,
         ocr_items: Sequence[OCRItem],
         default_conf: float,
         image_size: Optional[Dict[str, int]],
@@ -341,7 +431,15 @@ class FileParserService:
                     if "boxes" in row:
                         row["boxes"] = {k: v for k, v in row["boxes"].items() if k in headers}
 
+        rows_out = self._merge_fragmented_rows(headers, rows_out)
         header_boxes, rows_out = self._estimate_cell_regions(headers, header_boxes, rows_out, transform_context)
+        rows_out = self._recover_numeric_cells(
+            headers,
+            rows_out,
+            ocr_items,
+            image_bgr,
+            transform_context,
+        )
         rows_out = self._normalize_transcript_rows(headers, rows_out)
 
         result: Dict[str, Any] = {
@@ -390,6 +488,84 @@ class FileParserService:
                 merged.append(bottom or top)
         return merged
 
+    def _merge_fragmented_rows(
+        self,
+        headers: Sequence[str],
+        rows_out: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if len(rows_out) < 2:
+            return rows_out
+
+        merged_rows: List[Dict[str, Any]] = []
+        idx = 0
+        while idx < len(rows_out):
+            current = rows_out[idx]
+            if idx + 1 >= len(rows_out):
+                merged_rows.append(current)
+                break
+
+            nxt = rows_out[idx + 1]
+            current_values = current.get("values", {})
+            next_values = nxt.get("values", {})
+            current_non_empty = [h for h in headers if str(current_values.get(h, "")).strip()]
+            next_non_empty = [h for h in headers if str(next_values.get(h, "")).strip()]
+
+            if self._should_merge_fragmented_rows(headers, current_non_empty, next_non_empty):
+                merged = {
+                    "values": dict(current_values),
+                    "confidences": dict(current.get("confidences", {})),
+                    "boxes": dict(current.get("boxes", {})),
+                }
+                for header in headers:
+                    if str(merged["values"].get(header, "")).strip():
+                        continue
+                    next_value = next_values.get(header, "")
+                    if str(next_value).strip():
+                        merged["values"][header] = next_value
+                        conf = nxt.get("confidences", {}).get(header)
+                        if conf is not None:
+                            merged["confidences"][header] = conf
+                        box = nxt.get("boxes", {}).get(header)
+                        if box is not None:
+                            merged["boxes"][header] = box
+                if not merged["boxes"]:
+                    merged.pop("boxes")
+                merged_rows.append(merged)
+                idx += 2
+                continue
+
+            merged_rows.append(current)
+            idx += 1
+
+        return merged_rows
+
+    @staticmethod
+    def _should_merge_fragmented_rows(
+        headers: Sequence[str],
+        current_non_empty: Sequence[str],
+        next_non_empty: Sequence[str],
+    ) -> bool:
+        if not current_non_empty or not next_non_empty:
+            return False
+        overlap = set(current_non_empty) & set(next_non_empty)
+        if overlap:
+            return False
+        if len(current_non_empty) > max(3, len(headers) // 2):
+            return False
+        if len(next_non_empty) > max(3, len(headers) // 2):
+            return False
+
+        current_idx = [headers.index(h) for h in current_non_empty if h in headers]
+        next_idx = [headers.index(h) for h in next_non_empty if h in headers]
+        if not current_idx or not next_idx:
+            return False
+
+        current_max = max(current_idx)
+        next_min = min(next_idx)
+
+        # 两行字段互补且后一行落在更靠后的列，判定为被拆开的同一条记录
+        return next_min >= current_max and (len(current_non_empty) + len(next_non_empty)) <= len(headers)
+
     def _normalize_transcript_rows(
         self, headers: Sequence[str], rows_out: List[Dict[str, Any]]
     ) -> List[Dict[str, Any]]:
@@ -413,6 +589,8 @@ class FileParserService:
             # 排除明显是元信息残留的行
             joined = "".join(str(values.get(h, "")).strip() for h in headers)
             if any(k in joined for k in ("姓名", "学号", "班级", "学院")) and len(headers) <= 3:
+                continue
+            if any(k in joined for k in ("班主任", "老师", "2024年", "2025年", "2026年")):
                 continue
 
             row_payload = {"values": values, "confidences": confidences}
@@ -505,11 +683,8 @@ class FileParserService:
         new_rows: List[Dict[str, Any]] = []
         for row_idx, row in enumerate(rows_out):
             row_copy = dict(row)
-            existing_boxes = row.get("boxes", {})
             new_boxes: Dict[str, Dict[str, Any]] = {}
             for col_idx, header in enumerate(headers):
-                if header not in existing_boxes:
-                    continue
                 new_boxes[header] = self._bounds_to_polygon(
                     origin,
                     x_axis,
@@ -526,6 +701,199 @@ class FileParserService:
             new_rows.append(row_copy)
 
         return new_header_boxes, new_rows
+
+    def _recover_numeric_cells(
+        self,
+        headers: Sequence[str],
+        rows_out: List[Dict[str, Any]],
+        ocr_items: Sequence[OCRItem],
+        image_bgr: Optional[np.ndarray],
+        transform_context: Optional[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not rows_out or not ocr_items:
+            return rows_out
+
+        coord_key = "processed_points" if transform_context else "points"
+        column_examples: Dict[str, List[float]] = {header: [] for header in headers}
+        for row in rows_out:
+            values = row.get("values", {})
+            for header in headers:
+                value = values.get(header, "")
+                parsed = self._parse_score(value)
+                if parsed is not None:
+                    column_examples[header].append(float(parsed))
+
+        recovered_rows: List[Dict[str, Any]] = []
+        for row in rows_out:
+            row_copy = {
+                "values": dict(row.get("values", {})),
+                "confidences": dict(row.get("confidences", {})),
+                "boxes": dict(row.get("boxes", {})),
+            }
+            for header in headers:
+                if not self._is_numeric_column(header):
+                    continue
+                current_value = str(row_copy["values"].get(header, "")).strip()
+                if current_value:
+                    continue
+                cell_box = row_copy["boxes"].get(header)
+                if not cell_box:
+                    continue
+                candidate = self._extract_text_from_cell(
+                    cell_box,
+                    coord_key,
+                    ocr_items,
+                    transform_context,
+                )
+                if not candidate and image_bgr is not None:
+                    candidate = self._run_local_cell_ocr(
+                        image_bgr,
+                        cell_box,
+                        coord_key,
+                        transform_context,
+                    )
+                if not candidate:
+                    continue
+                repaired = self._repair_numeric_candidate(candidate, column_examples.get(header, []))
+                if repaired is None:
+                    continue
+                row_copy["values"][header] = repaired
+                row_copy["confidences"][header] = round(
+                    OCRService.best_match_confidence(str(candidate), ocr_items) or 0.72,
+                    4,
+                )
+            if not row_copy["boxes"]:
+                row_copy.pop("boxes")
+            recovered_rows.append(row_copy)
+        return recovered_rows
+
+    def _extract_text_from_cell(
+        self,
+        cell_box: Dict[str, Any],
+        coord_key: str,
+        ocr_items: Sequence[OCRItem],
+        transform_context: Optional[Dict[str, Any]],
+    ) -> str:
+        pts = self._points_array(cell_box, coord_key)
+        if pts is None:
+            return ""
+        x1 = float(np.min(pts[:, 0]))
+        y1 = float(np.min(pts[:, 1]))
+        x2 = float(np.max(pts[:, 0]))
+        y2 = float(np.max(pts[:, 1]))
+        pad_x = max((x2 - x1) * 0.08, 0.005)
+        pad_y = max((y2 - y1) * 0.12, 0.005)
+        tokens: List[Tuple[float, str]] = []
+        for item in ocr_items:
+            bb = self.ocr_service._xyxy(item.box)
+            if not bb:
+                continue
+            cx = (bb[0] + bb[2]) / 2.0
+            cy = (bb[1] + bb[3]) / 2.0
+            if coord_key == "processed_points" and transform_context is not None:
+                processed_size = transform_context["processed_size"]
+                width = max(1.0, float(processed_size["width"]))
+                height = max(1.0, float(processed_size["height"]))
+                cx_norm = cx / width
+                cy_norm = cy / height
+            else:
+                original_size = (transform_context or {}).get("original_size", {})
+                width = max(1.0, float(original_size.get("width", 1.0)))
+                height = max(1.0, float(original_size.get("height", 1.0)))
+                cx_norm = cx / width
+                cy_norm = cy / height
+            text = str(item.text or "").strip()
+            if not text:
+                continue
+            if x1 - pad_x <= cx_norm <= x2 + pad_x and y1 - pad_y <= cy_norm <= y2 + pad_y:
+                tokens.append((cx_norm, text))
+
+        if not tokens:
+            return ""
+        tokens.sort(key=lambda item: item[0])
+        return "".join(text for _, text in tokens).strip()
+
+    def _run_local_cell_ocr(
+        self,
+        image_bgr: np.ndarray,
+        cell_box: Dict[str, Any],
+        coord_key: str,
+        transform_context: Optional[Dict[str, Any]],
+    ) -> str:
+        if image_bgr is None:
+            return ""
+        pts = self._points_array(cell_box, coord_key)
+        if pts is None:
+            return ""
+
+        h, w = image_bgr.shape[:2]
+        x1 = max(0, int(np.floor(np.min(pts[:, 0]) * w)) - 6)
+        y1 = max(0, int(np.floor(np.min(pts[:, 1]) * h)) - 6)
+        x2 = min(w - 1, int(np.ceil(np.max(pts[:, 0]) * w)) + 6)
+        y2 = min(h - 1, int(np.ceil(np.max(pts[:, 1]) * h)) + 6)
+        if x2 <= x1 or y2 <= y1:
+            return ""
+
+        crop = image_bgr[y1 : y2 + 1, x1 : x2 + 1]
+        if crop.size == 0:
+            return ""
+
+        # 对小数值格做更激进的局部放大，优先救回 6.4 / 6.6 / 6.7 这类短文本。
+        crop = cv2.copyMakeBorder(
+            crop,
+            8,
+            8,
+            8,
+            8,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(255, 255, 255),
+        )
+        crop = cv2.resize(crop, None, fx=2.4, fy=2.4, interpolation=cv2.INTER_CUBIC)
+
+        try:
+            items = self.ocr_service.recognize_text(crop, preprocess=True)
+        except Exception:
+            return ""
+        if not items:
+            return ""
+
+        tokens = [str(item.text or "").strip() for item in items if str(item.text or "").strip()]
+        if not tokens:
+            return ""
+        return "".join(tokens)
+
+    @staticmethod
+    def _repair_numeric_candidate(candidate: str, examples: Sequence[float]) -> Optional[int | float]:
+        text = str(candidate or "").strip()
+        if not text:
+            return None
+        normalized = re.sub(r"[^0-9.]", "", text)
+        if not normalized:
+            return None
+        normalized = re.sub(r"\.{2,}", ".", normalized)
+        if normalized.count(".") > 1:
+            first = normalized.find(".")
+            normalized = normalized[: first + 1] + normalized[first + 1 :].replace(".", "")
+
+        parsed = FileParserService._parse_score(normalized)
+        if parsed is not None:
+            return parsed
+
+        digits = re.sub(r"\D+", "", normalized)
+        if not digits:
+            return None
+
+        if examples:
+            decimals = [value for value in examples if abs(value - int(value)) > 1e-6]
+            if decimals:
+                median_example = float(np.median(np.array(decimals, dtype=np.float32)))
+                if 0 < median_example < 10 and len(digits) >= 2:
+                    repaired = f"{digits[0]}.{digits[1:]}"
+                    parsed = FileParserService._parse_score(repaired)
+                    if parsed is not None:
+                        return parsed
+
+        return None
 
     def _refine_col_bounds(
         self,

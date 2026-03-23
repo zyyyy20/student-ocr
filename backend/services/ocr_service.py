@@ -47,6 +47,9 @@ class OCRService:
         self._title_min_width_ratio = 0.35
         self._document_min_area_ratio = 0.35
         self._cell_min_size = 12
+        self._paper_crop_min_area_ratio = 0.22
+        self._paper_crop_min_width_ratio = 0.38
+        self._paper_crop_min_height_ratio = 0.55
 
     @staticmethod
     def _create_with_compat(factory, kwargs: Dict[str, Any]):
@@ -124,6 +127,13 @@ class OCRService:
         image_bgr = self._normalize_input_image(image_bgr)
         original_h, original_w = image_bgr.shape[:2]
         transform = self._identity_transform()
+
+        if alpha is None:
+            paper_mask = self._extract_paper_mask(image_bgr)
+            crop_bbox = self._safe_crop_bbox_from_mask(image_bgr, paper_mask)
+            if crop_bbox is not None:
+                image_bgr, crop_matrix = self._crop_by_bbox(image_bgr, crop_bbox)
+                transform = crop_matrix @ transform
 
         # 透明背景截图大多只是旋转，不是透视拍照；此时跳过透视校正，避免反投影失真。
         if alpha is None:
@@ -504,26 +514,53 @@ class OCRService:
 
         try:
             hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
+            lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
         except Exception:
             return None
 
         # 选择近白色区域（高亮度、低饱和），并通过形态学去掉棋盘噪声
         v = hsv[:, :, 2]
         v_blur = cv2.GaussianBlur(v, (5, 5), 0)
-        mask = cv2.inRange(hsv, (0, 0, 235), (179, 60, 255))
-        mask = cv2.bitwise_and(mask, cv2.threshold(v_blur, 235, 255, cv2.THRESH_BINARY)[1])
+        l = lab[:, :, 0]
+        a = lab[:, :, 1]
+        b = lab[:, :, 2]
+        mask_hsv = cv2.inRange(hsv, (0, 0, 210), (179, 70, 255))
+        mask_v = cv2.threshold(v_blur, 215, 255, cv2.THRESH_BINARY)[1]
+        mask_lab = cv2.inRange(l, 205, 255)
+        neutral_ab = cv2.inRange(cv2.absdiff(a, np.full_like(a, 128)), 0, 18)
+        neutral_bb = cv2.inRange(cv2.absdiff(b, np.full_like(b, 128)), 0, 18)
+        mask_neutral = cv2.bitwise_and(neutral_ab, neutral_bb)
+        mask = cv2.bitwise_or(
+            cv2.bitwise_and(mask_hsv, mask_v),
+            cv2.bitwise_and(mask_lab, mask_neutral),
+        )
         if mask is None:
             return None
 
-        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
-        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 25))
+        kernel_open = cv2.getStructuringElement(cv2.MORPH_RECT, (11, 11))
+        kernel_close = cv2.getStructuringElement(cv2.MORPH_RECT, (31, 31))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             return mask
 
-        largest = max(contours, key=cv2.contourArea)
+        h, w = image_bgr.shape[:2]
+        image_cx = w / 2.0
+        image_cy = h / 2.0
+
+        def contour_score(contour: np.ndarray) -> float:
+            area = cv2.contourArea(contour)
+            if area <= 0:
+                return -1.0
+            x, y, ww, hh = cv2.boundingRect(contour)
+            cx = x + ww / 2.0
+            cy = y + hh / 2.0
+            center_penalty = abs(cx - image_cx) / max(w, 1) + abs(cy - image_cy) / max(h, 1)
+            aspect_penalty = abs((hh / max(ww, 1)) - 1.4)
+            return area - (center_penalty * 0.12 + aspect_penalty * 0.04) * (w * h)
+
+        largest = max(contours, key=contour_score)
         area = cv2.contourArea(largest)
         if area < 2000:
             return mask
@@ -532,17 +569,15 @@ class OCRService:
         cv2.drawContours(paper, [largest], -1, 255, thickness=-1)
         return paper
 
-    @staticmethod
-    def _crop_to_paper(image_bgr: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
-        crop_bbox = OCRService._safe_crop_bbox_from_mask(image_bgr, mask)
+    def _crop_to_paper(self, image_bgr: np.ndarray, mask: Optional[np.ndarray]) -> np.ndarray:
+        crop_bbox = self._safe_crop_bbox_from_mask(image_bgr, mask)
         if crop_bbox is None:
             return image_bgr
         cropped, _matrix = OCRService._crop_by_bbox(image_bgr, crop_bbox)
         return cropped
 
-    @staticmethod
     def _safe_crop_bbox_from_mask(
-        image_bgr: np.ndarray, mask: Optional[np.ndarray]
+        self, image_bgr: np.ndarray, mask: Optional[np.ndarray]
     ) -> Optional[Tuple[int, int, int, int]]:
         if image_bgr is None or mask is None:
             return None
@@ -560,10 +595,17 @@ class OCRService:
             return None
 
         # 过于激进的裁切容易丢列，设置保守阈值
-        if (box_w / w) < 0.8 or (box_h / h) < 0.8 or (box_w * box_h) < (0.6 * w * h):
+        area_ratio = (box_w * box_h) / max(float(w * h), 1.0)
+        aspect_ratio = box_h / max(float(box_w), 1.0)
+        if (
+            (box_w / w) < self._paper_crop_min_width_ratio
+            or (box_h / h) < self._paper_crop_min_height_ratio
+            or area_ratio < self._paper_crop_min_area_ratio
+            or not (0.9 <= aspect_ratio <= 2.2)
+        ):
             return None
 
-        pad = 30
+        pad = 36
         x1 = max(0, x1 - pad)
         y1 = max(0, y1 - pad)
         x2 = min(w - 1, x2 + pad)
@@ -631,11 +673,69 @@ class OCRService:
         if ww * hh < (self._table_roi_min_ratio * w * h):
             return None
 
+        content_box = self._estimate_text_content_bbox(image_bgr)
+        if content_box is not None:
+            cx1, cy1, cx2, cy2 = content_box
+            x = min(x, cx1)
+            y = min(y, cy1)
+            right = max(x + ww, cx2)
+            bottom = min(y + hh, cy2)
+            ww = max(0, right - x)
+            hh = max(0, bottom - y)
+            if ww <= 0 or hh <= 0:
+                return None
+
         pad = 6
         x1 = max(0, x - pad)
         y1 = max(0, y - pad)
         x2 = min(w - 1, x + ww + pad)
         y2 = min(h - 1, y + hh + pad)
+        return x1, y1, x2, y2
+
+    def _estimate_text_content_bbox(self, image_bgr: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        try:
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        except Exception:
+            return None
+
+        h, w = gray.shape[:2]
+        bw = cv2.adaptiveThreshold(
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 31, 12
+        )
+        bw = cv2.medianBlur(bw, 3)
+        bw = cv2.morphologyEx(
+            bw,
+            cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+            iterations=1,
+        )
+        contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+
+        boxes: List[Tuple[int, int, int, int]] = []
+        for contour in contours:
+            x, y, ww, hh = cv2.boundingRect(contour)
+            area = ww * hh
+            if area < 24 or ww < 3 or hh < 6:
+                continue
+            if ww > w * 0.95 and hh > h * 0.95:
+                continue
+            boxes.append((x, y, x + ww, y + hh))
+
+        if len(boxes) < 8:
+            return None
+
+        xs1 = [b[0] for b in boxes]
+        ys1 = [b[1] for b in boxes]
+        xs2 = [b[2] for b in boxes]
+        ys2 = [b[3] for b in boxes]
+        x1 = max(0, int(np.percentile(xs1, 5)) - 24)
+        y1 = max(0, int(np.percentile(ys1, 3)) - 24)
+        x2 = min(w - 1, int(max(xs2)) + 40)
+        y2 = min(h - 1, int(np.percentile(ys2, 94)) + 36)
+        if x2 <= x1 or y2 <= y1:
+            return None
         return x1, y1, x2, y2
 
     @staticmethod
