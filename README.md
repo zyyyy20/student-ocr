@@ -9,7 +9,7 @@
 
 技术栈：
 
-- 后端：FastAPI + PaddleOCR/PaddleX + OpenCV
+- 后端：FastAPI + PaddleOCR / PaddleX + OpenCV
 - 前端：原生 HTML / CSS / JS
 
 ## 启动
@@ -43,8 +43,6 @@ python -m unittest discover -s tests -v
 ```
 
 ## 项目环境说明
-
-以下环境说明需要保留，便于项目复现和答辩说明。
 
 运行环境：
 
@@ -102,8 +100,6 @@ tools/
 -> 前端高亮联动
 -> Excel 导出
 ```
-
-下面按步骤说明当前实现。
 
 ## 1. 文件入口
 
@@ -179,19 +175,6 @@ def preprocess_with_context(self, image_bgr: np.ndarray) -> Dict[str, Any]:
 - 灰度图统一转 BGR
 - 带透明通道的 PNG 统一合成白底
 
-核心代码：
-
-```python
-def _normalize_input_image(self, image_bgr: np.ndarray) -> np.ndarray:
-    if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 4:
-        bgr = image_bgr[:, :, :3]
-        alpha = image_bgr[:, :, 3]
-        return self._alpha_composite_white(bgr, alpha)
-    if len(image_bgr.shape) == 2:
-        return cv2.cvtColor(image_bgr, cv2.COLOR_GRAY2BGR)
-    return image_bgr
-```
-
 ### 2.2 白纸区域检测与裁切
 
 目的：
@@ -202,37 +185,13 @@ def _normalize_input_image(self, image_bgr: np.ndarray) -> np.ndarray:
 
 - 使用 `HSV + LAB` 组合阈值提取亮白区域
 - 再用形态学操作过滤噪声
-- 选择最像“纸张”的外轮廓
-
-核心代码：
-
-```python
-def _extract_paper_mask(image_bgr: np.ndarray) -> Optional[np.ndarray]:
-    hsv = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2HSV)
-    lab = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2LAB)
-    mask_hsv = cv2.inRange(hsv, (0, 0, 210), (179, 70, 255))
-    mask_lab = cv2.inRange(lab[:, :, 0], 205, 255)
-    mask = cv2.bitwise_or(mask_hsv, mask_lab)
-    ...
-    largest = max(contours, key=contour_score)
-    cv2.drawContours(paper, [largest], -1, 255, thickness=-1)
-```
+- 选择最像纸张的外轮廓
 
 ### 2.3 透视校正
 
 目的：
 
 - 处理拍照造成的梯形变形
-
-核心代码：
-
-```python
-def _perspective_correct_with_matrix(self, image_bgr, quad):
-    rect = self._order_quad_points(quad)
-    matrix = cv2.getPerspectiveTransform(rect, dst)
-    corrected = cv2.warpPerspective(image_bgr, matrix, (max_width, max_height))
-    return corrected, matrix
-```
 
 ### 2.4 旋转纠偏
 
@@ -244,18 +203,6 @@ def _perspective_correct_with_matrix(self, image_bgr, quad):
 
 - 优先纸面角度
 - 失败后退化到 Hough 直线和投影法
-
-核心代码：
-
-```python
-def _deskew_rotate_with_matrix(self, image_bgr, alpha_mask=None):
-    if alpha_mask is not None:
-        angle = self._estimate_skew_min_area(alpha_mask)
-    if angle is None and paper_mask is not None:
-        angle = self._estimate_skew_paper(paper_mask)
-    if angle is None:
-        angle = self._estimate_skew_angle(image_bgr)
-```
 
 ### 2.5 表格/内容区域裁切
 
@@ -269,69 +216,73 @@ def _deskew_rotate_with_matrix(self, image_bgr, alpha_mask=None):
 - 再用文字连通域估计真正有内容的区域
 - 二次收紧裁切框
 
-核心代码：
-
-```python
-def _estimate_table_bbox(self, image_bgr):
-    bw = self._binarize_for_table(gray)
-    _horiz, _vert, grid = self._extract_grid_lines(bw)
-    x, y, ww, hh = cv2.boundingRect(max(contours, key=cv2.contourArea))
-
-    content_box = self._estimate_text_content_bbox(image_bgr)
-    if content_box is not None:
-        cx1, cy1, cx2, cy2 = content_box
-        x = min(x, cx1)
-        y = min(y, cy1)
-        right = max(x + ww, cx2)
-        bottom = min(y + hh, cy2)
-```
-
 ### 2.6 小图增强
 
 目的：
 
 - 提升小数字、小中文的识别率
 
+## 3. OCR 处理详解
+
+OCR 是整个系统的核心。当前实现不是“整图跑一次 OCR 就结束”，而是分成“整图 OCR、表格结构恢复、单元格补识别”三个层次。
+
+### 3.1 整图 OCR 的作用
+
+整图 OCR 由 `backend/services/ocr_service.py` 中的 `recognize_text()` 完成。
+
+它的作用不是只拿最终文本，而是同时提供三类信息：
+
+- 文本内容 `text`
+- 置信度 `confidence`
+- 检测框 `box`
+
+这些信息后续会同时用于：
+
+- 标题和元信息提取
+- 表格结构恢复
+- 单元格高亮定位
+- 低置信度标红
+- 缺失数字的补识别
+
 核心代码：
 
 ```python
-def _enhance_for_ocr_with_matrix(self, image_bgr):
-    padded = cv2.copyMakeBorder(image_bgr, pad, pad, pad, pad, ...)
-    scaled = cv2.resize(padded, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-    return scaled, matrix
+def recognize_text(self, image_bgr: np.ndarray, *, preprocess: bool = True) -> List[OCRItem]:
+    if preprocess:
+        image_bgr = self.preprocess_image(image_bgr)
+
+    ocr = self._get_ocr()
+    results = ocr.ocr(image_bgr, cls=True)
+    ...
+    items.append(OCRItem(text=text, confidence=conf, box=box_pts))
+    return items
 ```
 
-## 3. OCR 与二次聚焦
+### 3.2 PaddleOCR 在这里做了什么
 
-核心代码在 `backend/services/parser_service.py` 的 `_parse_image()`。
+PaddleOCR 在这里承担的是“文本检测 + 文本识别”两件事：
 
-当前流程：
+1. 文本检测  
+   找出图上每一块文字所在区域，输出 polygon/box。
 
-1. 预处理整图
-2. 做一次整图 OCR
-3. 提取标题等元信息
-4. 根据 OCR 结果再聚焦到表格有效区域
-5. 对聚焦后的图重新做 OCR 和表格识别
+2. 文本识别  
+   对每个文字区域进行字符识别，输出字符串和置信度。
 
-核心代码：
+这也是为什么系统后面不仅能得到 `张三 / 95 / 6.4` 这类文本，还能知道它们在图上的位置。
 
-```python
-def _parse_image(self, data: bytes) -> Dict[str, Any]:
-    image_bgr = self.ocr_service.decode_image(data)
-    preprocess_result = self.ocr_service.preprocess_with_context(image_bgr)
-    image_bgr = preprocess_result["image"]
-    transform_context = preprocess_result["context"]
+### 3.3 为什么不能只靠 OCR 文本顺序恢复表格
 
-    ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
-    meta = self._extract_transcript_meta(ocr_items)
-    image_bgr, transform_context, focused = self._focus_table_region(
-        image_bgr, ocr_items, transform_context
-    )
-    if focused:
-        ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
-```
+单纯拿 OCR 输出的文本顺序直接拼表格，问题很多：
 
-## 4. 表格结构恢复
+- 拍照后同一行文字的 y 坐标会有波动
+- 表格线和文字会互相干扰
+- 同一列的短数字可能会错落
+- 有的行会被拆成两段
+- 有的数字会漏识别
+
+所以当前系统不是“按 OCR 顺序直接拼”，而是先把 OCR 当作原始观测，再恢复表格结构。
+
+## 4. OCR 之后的表格结构恢复
 
 核心代码在 `backend/services/ocr_service.py` 的 `recognize_table()`。
 
@@ -358,7 +309,93 @@ def recognize_table(self, image_bgr, *, ocr_items=None, preprocess=True):
     pred = engine.predict(image_bgr)
 ```
 
-## 5. 表格解析与字段结构化
+### 4.1 路径一：OCR 框聚类
+
+适用场景：
+
+- 规则截图
+- 边框不强但排版整齐
+
+原理：
+
+- 先按 y 坐标把 OCR 框聚成“行”
+- 再按 x 坐标把 OCR 框聚成“列”
+- 最终重建二维表格
+
+核心代码：
+
+```python
+def _items_to_grid(self, items: Sequence[OCRItem]) -> List[List[str]]:
+    enriched.sort(key=lambda t: t[3])  # by y_center
+    ...
+    if abs(yc - rc) <= y_tol:
+        rows[idx].append((it, x1, y1, x2, y2))
+    ...
+    if abs(xc - col_centers[-1]) <= x_tol:
+        ...
+```
+
+### 4.2 路径二：表格线结构恢复
+
+适用场景：
+
+- 纸面表格
+- 横线/竖线比较明显
+
+原理：
+
+- 先对图像二值化
+- 用形态学操作分别提取横线和竖线
+- 根据线交点和单元格轮廓恢复表格网格
+- 再把 OCR 文本分配到单元格中
+
+这一步的优势是“结构更强”，缺点是对弱线、断线、卷曲表格不一定稳定。
+
+### 4.3 路径三：PaddleX 表格识别兜底
+
+适用场景：
+
+- 前两种路径都不够稳定时
+
+原理：
+
+- 调用 PaddleX `table_recognition` pipeline
+- 尝试从更重的结构模型里拿 HTML 表格结果
+
+这个路径不是主路径，而是兜底路径。
+
+## 5. OCR 二次聚焦
+
+核心代码在 `backend/services/parser_service.py` 的 `_parse_image()`。
+
+当前流程：
+
+1. 预处理整图
+2. 先做一次整图 OCR
+3. 提取标题等元信息
+4. 根据 OCR 结果再聚焦到表格有效区域
+5. 对聚焦后的图重新做 OCR 和表格识别
+
+核心代码：
+
+```python
+ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
+meta = self._extract_transcript_meta(ocr_items)
+image_bgr, transform_context, focused = self._focus_table_region(
+    image_bgr, ocr_items, transform_context
+)
+if focused:
+    ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
+```
+
+这样做的原因是：
+
+- 第一次 OCR 负责“找区域”
+- 第二次 OCR 负责“在更聚焦的区域里提高识别质量”
+
+对拍照成绩单很有效。
+
+## 6. 表格解析与字段结构化
 
 核心代码在 `backend/services/parser_service.py` 的 `_extract_class_grid()`。
 
@@ -385,7 +422,7 @@ rows_out = self._recover_numeric_cells(headers, rows_out, ocr_items, image_bgr, 
 rows_out = self._normalize_transcript_rows(headers, rows_out)
 ```
 
-### 5.1 碎行合并
+### 6.1 碎行合并
 
 解决的问题：
 
@@ -403,11 +440,18 @@ def _should_merge_fragmented_rows(headers, current_non_empty, next_non_empty):
     return next_min >= current_max
 ```
 
-### 5.2 单元格区域估计
+### 6.2 单元格区域估计
 
 解决的问题：
 
 - 右侧点击后，左侧高亮不能只框文字，要尽量框整格
+
+原理：
+
+- 先估计表格主方向
+- 再估计每列中心、每行中心
+- 推导列边界和行边界
+- 生成整格 polygon
 
 核心代码：
 
@@ -420,7 +464,7 @@ new_boxes[header] = self._bounds_to_polygon(
 )
 ```
 
-### 5.3 数字补识别
+### 6.3 数字补识别
 
 解决的问题：
 
@@ -449,7 +493,7 @@ def _run_local_cell_ocr(self, image_bgr, cell_box, coord_key, transform_context)
     items = self.ocr_service.recognize_text(crop, preprocess=True)
 ```
 
-## 6. 元信息提取
+## 7. 元信息提取
 
 当前支持提取：
 
@@ -472,7 +516,7 @@ field_patterns = {
 }
 ```
 
-## 7. 前端高亮联动
+## 8. 前端高亮联动
 
 前端文件：
 
@@ -501,7 +545,7 @@ function showPreviewHighlight(shape) {
 }
 ```
 
-## 8. Excel 导出
+## 9. Excel 导出
 
 核心代码在 `backend/services/excel_service.py`。
 
@@ -523,7 +567,7 @@ def export_transcript(self, payload: Dict[str, Any]) -> str:
     self._autosize_columns(ws, headers, rows)
 ```
 
-## 9. 测试
+## 10. 测试
 
 当前测试包括：
 
@@ -535,25 +579,6 @@ def export_transcript(self, payload: Dict[str, Any]) -> str:
 
 ```powershell
 python -m unittest discover -s tests -v
-```
-
-## 10. 目录结构
-
-```text
-backend/
-  main.py
-  services/
-    ocr_service.py
-    parser_service.py
-    excel_service.py
-
-frontend/
-  index.html
-  script.js
-  style.css
-
-tests/
-tools/
 ```
 
 ## 11. 当前已知边界
