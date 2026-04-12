@@ -38,6 +38,13 @@ Desktop.ini
 *.model
 .paddlex/
 
+# Thesis / case figures output (Word/HTML + figures)
+out/
+
+# Local preprocess demo outputs (regenerate with python testdemo/run_pipeline_demo.py)
+testdemo/output/
+testdemo/stages/
+
 # Exports & generated files
 backend/static/exports/*.xlsx
 preprocessed*.png

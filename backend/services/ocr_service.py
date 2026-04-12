@@ -160,6 +160,51 @@ class OCRService:
         }
         return {"image": image_bgr, "context": context}
 
+    def preprocess_stage_snapshots(self, image_bgr: np.ndarray) -> Dict[str, np.ndarray]:
+        """
+        与 preprocess_with_context 完全一致的步骤顺序，记录各步之后的 BGR 图（用于论文插图等）。
+
+        键：01_normalized → 02_paper_crop → 03_perspective → 04_deskew → 05_table_roi → 06_enhanced。
+        若某步被跳过（如无 alpha 时未检出纸张 bbox、未检出四边形、透明图跳过透视等），
+        该步输出与上一步在像素上相同，仍为独立 copy。
+        """
+        if image_bgr is None:
+            return {}
+
+        stages: Dict[str, np.ndarray] = {}
+        alpha = None
+        if len(image_bgr.shape) == 3 and image_bgr.shape[2] == 4:
+            alpha = image_bgr[:, :, 3].copy()
+
+        current = self._normalize_input_image(image_bgr)
+        stages["01_normalized"] = current.copy()
+
+        cur = current
+        if alpha is None:
+            paper_mask = self._extract_paper_mask(cur)
+            crop_bbox = self._safe_crop_bbox_from_mask(cur, paper_mask)
+            if crop_bbox is not None:
+                cur, _ = self._crop_by_bbox(cur, crop_bbox)
+        stages["02_paper_crop"] = cur.copy()
+
+        cur2 = cur
+        if alpha is None:
+            quad = self._detect_document_quad(cur2)
+            if quad is not None:
+                cur2, _ = self._perspective_correct_with_matrix(cur2, quad)
+        stages["03_perspective"] = cur2.copy()
+
+        cur3, _ = self._deskew_rotate_with_matrix(cur2, alpha_mask=alpha)
+        stages["04_deskew"] = cur3.copy()
+
+        cur4, _ = self._crop_to_table_or_title_with_matrix(cur3)
+        stages["05_table_roi"] = cur4.copy()
+
+        cur5, _ = self._enhance_for_ocr_with_matrix(cur4)
+        stages["06_enhanced"] = cur5.copy()
+
+        return stages
+
     def debug_preprocess(self, image_bgr: np.ndarray) -> Dict[str, np.ndarray]:
         if image_bgr is None:
             return {}
@@ -328,7 +373,7 @@ class OCRService:
         max_width = int(max(width_a, width_b))
         max_height = int(max(height_a, height_b))
         if max_width < 50 or max_height < 50:
-            return image_bgr
+            return image_bgr, self._identity_transform()
 
         dst = np.array(
             [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
