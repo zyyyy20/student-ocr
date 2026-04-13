@@ -3,6 +3,9 @@
 生成毕业论文 Word（2252733-林子榆），默认输出到仓库 out/ 目录。
 运行：在仓库根目录执行  python tools/generate_thesis_2252733.py
 
+生成前会自动依次运行 testdemo/run_pipeline_demo.py、tools/build_thesis_case_figures.py、
+tools/build_chapter4_eg_figures.py；第 4 章插图优先使用 eg/fig_4_*.png（分节多案例），缺失时回退 testdemo/output/。
+
 正文引用：在传给 add_body_paragraph 的字符串中用「句内占位{{文献序号}}」，例如「……有效特征{{10}}。」（当前参考文献表为 [1]—[11]）
 生成 Word 时：正文「{{n}}」插入为 **REF 域**（指向参考文献中书签 litref_n），显示为右上角上标 [n]，与参考文献编号联动；用 Word 打开后可选中全文按 **F9** 更新域。
 """
@@ -29,15 +32,20 @@ FIG_SRC = Path(r"C:\Users\zy\Desktop\student-ocr\Snipaste_2026-02-24_19-13-43.pn
 PROJECT = Path(__file__).resolve().parent.parent
 THESIS_CASE_SCRIPT = PROJECT / "tools" / "build_thesis_case_figures.py"
 THESIS_DEMO_SCRIPT = PROJECT / "testdemo" / "run_pipeline_demo.py"
-FIG4_SEC = PROJECT / "testdemo" / "output"
-FIG4_1 = FIG4_SEC / "fig_4_1.png"
-FIG4_2 = FIG4_SEC / "fig_4_2.png"
-FIG4_3 = FIG4_SEC / "fig_4_3.png"
-FIG4_4 = FIG4_SEC / "fig_4_4.png"
-FIG4_5 = FIG4_SEC / "fig_4_5.png"
-FIG4_6 = FIG4_SEC / "fig_4_6.png"
+THESIS_CH4_EG_SCRIPT = PROJECT / "tools" / "build_chapter4_eg_figures.py"
+FIG4_EG_DIR = PROJECT / "eg"
+FIG4_FALLBACK_DIR = PROJECT / "testdemo" / "output"
 FIG6_4_A = OUTPUT_ROOT / "test2" / "02_original_vs_pipeline.png"
 FIG6_4_B = OUTPUT_ROOT / "test2" / "01_full_preprocess_pipeline.png"
+
+
+def resolve_fig4(index: int) -> Path:
+    """第 4 章插图：优先 eg/fig_4_{index}.png（分节多案例），否则 testdemo/output/。"""
+    name = f"fig_4_{index}.png"
+    eg = FIG4_EG_DIR / name
+    if eg.exists():
+        return eg
+    return FIG4_FALLBACK_DIR / name
 
 # 正文内引用占位：在字符串中写 {{1}}、{{2}} 等；生成 Word 时为 REF 交叉引用（见 add_literature_ref_field）
 _CITE_MARKER_RE = re.compile(r"\{\{(\d+)\}\}")
@@ -116,12 +124,13 @@ def add_reference_paragraph(doc: Document, ref_line: str) -> None:
 ABSTRACT_CN_MARKED = (
     "高校教学管理中存在大量以图片、拍照或扫描件形式流转的学生成绩单与班级成绩表，人工录入效率低、易出错。"
     "本文设计并实现了一套基于PaddleOCR{{1}}与PaddlePaddle{{7}}生态、并结合OpenCV{{6}}的学生成绩单自动识别系统，完成从图像输入、预处理、"
-    "文字检测到表格结构恢复、字段结构化、前端校对与高亮联动，直至 Excel 导出的完整链路。"
+    "文字检测到表格结构恢复、字段结构化、浏览器端校对编辑与 Excel 导出的完整链路。"
+    "工程上将检测识别结果统一为包含文本、置信度与四点框的 OCRItem 列表，作为表格恢复与业务解析的直接输入。"
     "系统采用FastAPI{{4}}提供 REST 接口，浏览器端以原生 HTML/CSS/JavaScript 实现交互。"
     "在表格恢复方面，综合采用基于 OCR 检测框的几何聚类、表格线网格提取以及PaddleX{{2}}表格识别流水线兜底的多路径策略；"
     "并引入二次聚焦 OCR 与单元格局部补识别，以提升短数字与小数点的召回率。"
     "实验与运行结果表明，相较传统“整图单次 OCR + 按阅读顺序拼接”或纯人工录入方式，本系统在结构化准确率、"
-    "可解释性（置信度与框选高亮）以及端到端处理效率方面具有明显优势。"
+    "可解释性（单元格置信度与低分标红提示）以及端到端处理效率方面具有明显优势。"
 )
 
 
@@ -195,12 +204,14 @@ def add_figure_placeholder(doc: Document, caption: str) -> None:
 
 
 def run_case_figure_script() -> None:
-    """先运行 testdemo 生成第4章六步对照图，再运行 tools 脚本生成 out/test1、out/test2 等；失败不阻断论文生成。"""
+    """运行插图流水线：testdemo → build_thesis_case_figures → build_chapter4_eg_figures（eg/ 多案例第4章图）；失败不阻断论文生成。"""
     scripts: list[Path] = []
     if THESIS_DEMO_SCRIPT.exists():
         scripts.append(THESIS_DEMO_SCRIPT)
     if THESIS_CASE_SCRIPT.exists():
         scripts.append(THESIS_CASE_SCRIPT)
+    if THESIS_CH4_EG_SCRIPT.exists():
+        scripts.append(THESIS_CH4_EG_SCRIPT)
     if not scripts:
         return
     for script in scripts:
@@ -210,7 +221,7 @@ def run_case_figure_script() -> None:
                 cwd=str(PROJECT),
                 capture_output=True,
                 text=True,
-                timeout=300,
+                timeout=600,
             )
             if cp.returncode != 0:
                 tail = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
@@ -223,8 +234,8 @@ def add_thesis_figure(doc: Document, image_path: Path, caption: str, *, width=In
     if not image_path.exists():
         add_figure_placeholder(
             doc,
-            f"【{caption}】未找到 {image_path.name}。请在仓库根目录执行 python testdemo/run_pipeline_demo.py，"
-            "或 python tools/build_thesis_case_figures.py，并保证主案例图像存在。",
+            f"【{caption}】未找到 {image_path.name}。请执行 python tools/build_chapter4_eg_figures.py（生成 eg/fig_4_*.png），"
+            "或 python testdemo/run_pipeline_demo.py / python tools/build_thesis_case_figures.py（testdemo/output/）。",
         )
         return
     doc.add_paragraph()
@@ -327,13 +338,13 @@ def build_docx() -> None:
         "Student transcripts and class grade sheets often circulate as images or scans in university administration, "
         "where manual digitization is slow and error-prone. This thesis presents an automatic recognition system "
         "based on PaddleOCR and OpenCV, covering image preprocessing, text detection and recognition, table structure "
-        "recovery, structured field extraction, interactive proofreading with highlight linkage, and Excel export. "
+        "recovery, structured field extraction, browser-based proofreading, and Excel export. "
         "The backend is built with FastAPI; the frontend uses plain HTML/CSS/JavaScript. "
         "For table recovery, a multi-path strategy combines geometry clustering on OCR boxes, grid-line based "
         "reconstruction, and a PaddleX table-recognition fallback. Secondary focused OCR and local cell re-recognition "
         "improve recall for short numeric cells. Compared with traditional single-pass OCR or purely manual entry, "
-        "the proposed system offers better structural fidelity, explainability via confidences and overlays, "
-        "and higher end-to-end efficiency."
+        "the proposed system offers better structural fidelity, explainability via per-cell confidences and low-score "
+        "highlighting in the editable grid, and higher end-to-end efficiency."
     )
     pe = doc.add_paragraph()
     pe.paragraph_format.line_spacing_rule = WD_LINE_SPACING.ONE_POINT_FIVE
@@ -386,27 +397,20 @@ def build_docx() -> None:
         "　4.6　表格与标题区域聚焦及小图增强……………………………34",
         "　4.7　OCR 调用封装与版本兼容……………………………………35",
         "　4.8　HTTP 服务层设计………………………………………………37",
-        "第5章　表格结构恢复与业务解析……………………………………38",
-        "　5.1　问题建模与多路径策略概述…………………………………38",
-        "　5.2　基于 OCR 检测框的行列聚类重建……………………………40",
-        "　5.3　表格线提取与线网格结构恢复………………………………42",
-        "　5.4　PaddleX 表格流水线与 HTML 解析…………………………44",
-        "　5.5　网格质量评分与路径决策………………………………………45",
-        "　5.6　二次聚焦 OCR 与解析管线……………………………………46",
-        "　5.7　表头识别、元信息与字段清洗………………………………48",
-        "　5.8　碎行合并、单元格区域与数字补识别………………………49",
-        "　5.9　前端高亮联动与 Excel 导出…………………………………51",
-        "第6章　系统实现、测试与实验分析…………………………………52",
-        "　6.1　实现环境与工具链……………………………………………52",
-        "　6.2　系统功能实现与运行说明……………………………………54",
-        "　6.3　测试方案与单元测试……………………………………………56",
-        "　6.4　实验数据集与对比基线…………………………………………57",
-        "　6.5　对比实验与结果分析……………………………………………58",
-        "　6.6　消融讨论与典型案例……………………………………………60",
-        "　6.7　性能、瓶颈与改进方向…………………………………………61",
+        "　4.9　OCR 输出数据结构与中间表示………………………………38",
+        "第5章　表格结构恢复与业务解析……………………………………39",
+        "　5.1　多路径表格恢复与路径决策……………………………………39",
+        "　5.2　解析管线与业务网格抽取………………………………………42",
+        "　5.3　交互、导出与接口数据契约……………………………………45",
+        "第6章　系统实现、测试与实验分析…………………………………54",
+        "　6.1　实现环境与部署运行……………………………………………54",
+        "　6.2　端到端功能与流程说明…………………………………………56",
+        "　6.3　自动化测试与回归验证…………………………………………57",
+        "　6.4　系统界面与实验插图……………………………………………59",
+        "　6.5　消融讨论、性能与改进方向……………………………………61",
         "第7章　总结与展望……………………………………………………62",
-        "参考文献…………………………………………………………………64",
-        "致谢………………………………………………………………………66",
+        "参考文献…………………………………………………………………66",
+        "致谢………………………………………………………………………68",
     ]
     for line in toc_lines:
         tp = doc.add_paragraph()
@@ -446,8 +450,8 @@ def build_docx() -> None:
         "本文以开源项目“学生成绩单自动识别系统”为工程载体，主要工作包括：（1）基于OpenCV{{6}}的输入归一化、白纸区域提取、"
         "透视校正、旋转纠偏与表格区域裁切；（2）封装PaddleOCR{{1}}完成文本检测与识别，并记录检测框与置信度；（3）设计 OCR 框聚类、"
         "表格线网格与PaddleX{{2}}兜底相结合的多路径表格恢复；（4）在解析层实现表头识别、碎行合并、单元格区域估计与数字补识别；"
-        "（5）基于FastAPI{{4}}与静态前端实现上传、预览、高亮联动与 Excel 导出。研究方法以工程实现与对比实验为主，辅以定量指标与定性分析；"
-        "第6章进一步给出数据集划分、基线设置、对比表框架、运行截图位、消融与性能讨论及单元测试回归方案，便于在答辩前填入实测数据。",
+        "（5）基于FastAPI{{4}}与静态前端实现上传、双图预览、可编辑校对与 Excel 导出。研究方法以工程实现与定性分析为主；"
+        "第6章给出 unittest 回归方案、系统运行说明、界面与预处理插图位，以及消融、性能与可维护性讨论。",
     )
 
     add_heading(doc, "1.4　论文组织结构", 2)
@@ -456,8 +460,10 @@ def build_docx() -> None:
         "全文共分七章，整体框架遵循“理论基础—需求与总体设计—核心算法与模块—系统实现与实验—总结”的工科论文常见写法。"
         "第2章从文档图像与 OCR 基本概念出发，综述深度学习检测识别、飞桨生态、OpenCV 文档处理、Web 与序列化技术及评测原则；"
         "第3章分析角色场景、功能与非功能需求，给出分层架构、模块职责、接口与数据模型；"
-        "第4章围绕预处理流水线、几何变换、OCR 封装与 HTTP 服务展开；第5章讨论多路径表格恢复、解析纠错与前后端联动；"
-        "第6章介绍实现环境、测试方案、对比实验与性能讨论；第7章总结全文并展望未来工作。",
+        "第4章围绕预处理流水线、几何变换、OCR 封装、HTTP 服务以及 OCR 统一输出格式（OCRItem 列表）展开；"
+        "第5章在该中间表示之上讨论多路径表格恢复、业务解析纠错与对外 JSON 数据契约；"
+        "第6章从实现部署、自动化测试与回归验证出发，以有序插图佐证界面与预处理效果，并讨论消融、性能与改进；"
+        "第7章总结全文并展望未来工作。",
     )
 
     add_heading(doc, "第2章　相关技术与理论基础", 1)
@@ -484,7 +490,7 @@ def build_docx() -> None:
     )
     add_body_paragraph(
         doc,
-        "置信度是工程落地的重要信号：低置信度不一定意味着错误，但可作为“需要人工复核”的触发条件；与几何框结合后，还能支持点击高亮、局部放大再识别等交互。"
+        "置信度是工程落地的重要信号：低置信度不一定意味着错误，但可作为“需要人工复核”的触发条件；前端据此对单元格标红提示，与可编辑表格共同支撑人工校对。"
         "本系统在 OCRItem 中统一保存 text、confidence 与 box，为后续表格聚类、低分标红与局部补识别提供一致的数据契约{{1}}。",
     )
     add_heading(doc, "2.3　PaddleOCR 与 PaddleX 表格理解", 2)
@@ -512,7 +518,7 @@ def build_docx() -> None:
     add_body_paragraph(
         doc,
         "FastAPI 与 Uvicorn 构成常用的异步 Web 部署组合{{4}}：前者基于类型注解自动生成 OpenAPI 文档并原生支持 async/await，适合 I/O 密集的上传解析场景；后者作为 ASGI 服务器提供高性能事件循环。"
-        "前后端以 JSON 作为交换格式，可嵌套 headers、rows、meta、每格 confidences 与多边形 points 字段，兼顾机器处理与人的可视化校对。",
+        "前后端以 JSON 作为交换格式，可嵌套 headers、rows、meta、每格 confidences 及预处理预览等字段，兼顾机器处理与人工校对。",
     )
     add_body_paragraph(
         doc,
@@ -532,7 +538,7 @@ def build_docx() -> None:
     add_body_paragraph(
         doc,
         "主要用户可抽象为教务管理员、辅导员与任课教师：其共同需求是将微信群、邮箱或纸质材料中的成绩单图片尽快转为可统计的电子表。"
-        "典型业务流程为：选择文件上传 → 等待服务端解析 → 在网页上核对表头与成绩 → 必要时点击单元格对照原图高亮 → 确认后导出 Excel → 在教务或统计软件中二次处理。",
+        "典型业务流程为：选择文件上传 → 等待服务端解析 → 在网页上对照原图与预处理预览、核对表头与成绩并可直接编辑 → 确认后导出 Excel → 在教务或统计软件中二次处理。",
     )
     add_body_paragraph(
         doc,
@@ -544,7 +550,7 @@ def build_docx() -> None:
         doc,
         "（1）图像类输入：支持 PNG/JPG 解码，完成预处理、OCR、表格恢复与结构化输出；（2）矢量与电子表：SVG 优先解析 text 节点，失败则栅格化后走图像链路；"
         "XLSX 直接读取单元格矩阵并包装为与 OCR 结果一致的 JSON，便于前端复用表格组件。（3）元信息：自动抽取标题、姓名、学号、班级、学院、学期等键值对，允许缺失。"
-        "（4）交互：双预览模式（原图反投影 / 预处理图）下的多边形高亮；右侧表格可编辑。（5）导出：将当前表格写入 xlsx 并返回下载链接。",
+        "（4）交互：原图与预处理结果预览（可点击放大查看）；右侧表格可编辑，低置信度单元格标红。（5）导出：将当前表格写入 xlsx 并返回下载链接。",
     )
     add_body_paragraph(
         doc,
@@ -565,13 +571,13 @@ def build_docx() -> None:
     )
     add_body_paragraph(
         doc,
-        "模块边界上，OCRService 专注“图像进、检测框与表格矩阵出”；FileParserService 负责类型分派、业务字段解析与 JSON 组装；ExcelService 专注工作簿样式与写入。"
+        "模块边界上，OCRService 专注“图像进、OCRItem 列表与二维表格网格出”；FileParserService 负责类型分派、在网格与 OCR 观测之上做业务字段解析与 JSON 组装；ExcelService 专注工作簿样式与写入。"
         "这种划分有利于单元测试按模块 stub 依赖，也便于将来替换 OCR 引擎而少改上层逻辑。",
     )
     add_heading(doc, "3.5　接口、数据模型与错误处理", 2)
     add_body_paragraph(
         doc,
-        "POST /upload 接受 multipart/form-data，字段名为 file；成功时返回 application/json，包含 headers、rows、meta、可选 title、processed_preview 与每行每列的坐标信息。"
+        "POST /upload 接受 multipart/form-data，字段名为 file；成功时返回 application/json，包含 headers、rows、meta、可选 title、processed_preview 及每格 confidences 等。"
         "POST /export 接受 JSON body，校验 headers 为字符串数组、rows 为对象数组，否则返回 400。GET /health 返回 {\"status\":\"ok\"} 供运维探活。",
     )
     add_body_paragraph(
@@ -603,6 +609,11 @@ def build_docx() -> None:
         "便于突出旋转纠偏。（6）4.6：表格 ROI 已较集中、且分辨率偏低或边长较短的小图，便于观察白边 padding 与放大等送 OCR 前增强效果。"
         "上述每一类各准备若干张经脱敏处理的样本并记录元数据，即可与第 6 章数据集划分（A—D 类）相互印证。",
     )
+    add_body_paragraph(
+        doc,
+        "本章后半部分（4.7—4.9）转入识别与服务层：说明 PaddleOCR 调用封装、版本兼容、HTTP 接入方式，并在 4.9 给出统一的 OCRItem 中间表示，"
+        "作为第5章表格结构恢复的直接输入。",
+    )
     add_heading(doc, "4.1　图像表示、解码与调试输出", 2)
     add_body_paragraph(
         doc,
@@ -619,16 +630,15 @@ def build_docx() -> None:
     add_body_paragraph(
         doc,
         "OCRService.preprocess_stage_snapshots 与线上 preprocess_with_context 逐步对齐，将归一化、白纸掩膜预裁切（非透明分支）、透视、纠偏、表格/标题 ROI 裁切与送 OCR 前增强等各步之后的图像分别导出，"
-        "便于对照观察“哪一步开始劣化”。第 4.1—4.6 节在文字说明之后各配一张「处理前 | 处理后」对照图（由 testdemo/run_pipeline_demo.py 写入 testdemo/output/，"
-        "图内中文标题与左右说明与 tools/build_thesis_case_figures.py 共用 Pillow 绘制逻辑），"
-        "分别对应解码入口、归一化、白纸预裁切、透视、纠偏与 ROI 后增强；生成论文前会自动运行该 demo 脚本，"
-        "主案例固定为仓库根目录下的「Snipaste_2026-04-13_10-26-13.png」（高二（12）班平时成绩表桌面截图，便于观察各步效果）。"
-        "若需更换案例，可替换该文件或修改脚本中 PRIMARY_CASE 后重新运行脚本；亦可按章首「案例图准备建议」增补多类脱敏样例。",
+        "便于对照观察“哪一步开始劣化”。第 4.1—4.6 节各配一张「处理前 | 处理后」对照图：默认插入 eg/fig_4_1.png—fig_4_6.png，"
+        "由 tools/build_chapter4_eg_figures.py 基于「Snipaste_2026-04-13_10-26-13.png」合成 case_4_1—case_4_5；case_4_6 为 case_4_5 经流水线纠偏后再缩小，再对各案例走同一预处理链生成对照图；"
+        "图内中文标题与左右说明与 tools/build_thesis_case_figures.py 共用 Pillow 绘制逻辑。"
+        "若 eg/ 下尚无插图，生成论文脚本会回退使用 testdemo/output/fig_4_*.png（单主案例）。更换基准图或合成规则可编辑 build_chapter4_eg_figures.py。",
     )
     add_thesis_figure(
         doc,
-        FIG4_1,
-        "图4-1　4.1 节：解码与预处理入口前后对照（案例：Snipaste_2026-04-13_10-26-13.png；图中为中文标注）",
+        resolve_fig4(1),
+        "图4-1　4.1 节：解码与预处理入口前后对照（案例：eg/case_4_1.png，由基准 Snipaste 图合成；图中为中文标注）",
         width=Inches(5.2),
     )
 
@@ -645,8 +655,8 @@ def build_docx() -> None:
     )
     add_thesis_figure(
         doc,
-        FIG4_2,
-        "图4-2　4.2 节：归一化与透明通道前后对照（与图4-1 同源案例）",
+        resolve_fig4(2),
+        "图4-2　4.2 节：归一化与透明通道前后对照（案例：eg/case_4_2.png，BGRA边缘半透明）",
         width=Inches(5.2),
     )
 
@@ -655,13 +665,13 @@ def build_docx() -> None:
         doc,
         "当输入为办公桌木纹背景上的拍照成绩单时，整图直接 OCR 会引入大量无关检测框。系统在归一化之后、透视校正之前（preprocess_with_context 中非透明图分支），"
         "先用 HSV 与 LAB 组合阈值提取偏亮区域，辅以形态学开闭运算去噪，再在轮廓集合中选择面积与矩形度符合“纸张”假设的外接矩形，得到 crop_bbox 并做整页级预裁切。"
-        "裁切后更新齐次矩阵 forward_matrix，使后续所有框可通过 inverse_matrix 映射回原图，为高亮联动提供几何一致性。"
+        "裁切后更新齐次矩阵 forward_matrix，使服务端解析管线内在多步几何变换下保持坐标一致，并为二次聚焦等裁剪步骤提供可复合的变换上下文。"
         "原理上，阈值分割把像素按「是否像纸」分为两类，形态学开闭用于填小孔、断小梗，轮廓分析则在离散边界上选取最符合面积与长宽比约束的候选。",
     )
     add_thesis_figure(
         doc,
-        FIG4_3,
-        "图4-3　4.3 节：归一化后与白纸掩膜预裁切前后对照（与 preprocess_with_context 顺序一致；与图4-1 同源案例）",
+        resolve_fig4(3),
+        "图4-3　4.3 节：归一化后与白纸掩膜预裁切前后对照（案例：eg/case_4_3.png，桌面背景）",
         width=Inches(5.2),
     )
 
@@ -670,14 +680,14 @@ def build_docx() -> None:
         doc,
         "_detect_document_quad 在（可能已做纸张预裁切的）前景上寻找文档四边形，若成功则执行透视变换将梯形拉成近似矩形。"
         "对透明背景截图，算法上跳过纸张预裁切与透视步骤，以避免缺少真实纸缘时的虚假顶点估计。每一步几何操作均左乘到 3×3 变换矩阵，"
-        "保证可逆；最终在上下文中返回 original_size 与 processed_size，供前端选择不同坐标系绘制。"
+        "保证可逆；最终在上下文中返回 original_size 与 processed_size，供解析与聚焦等后续步骤在统一度量下使用。"
         "原理上，先在灰度图上经高斯平滑削弱噪声，再用 Canny 得到边缘，经膨胀与闭运算连接断缘，在候选轮廓上用多边形近似筛出四角点；"
         "透视变换由单应矩阵描述平面到平面的映射，warpPerspective 将源四边形像素重采样到目标矩形网格。",
     )
     add_thesis_figure(
         doc,
-        FIG4_4,
-        "图4-4　4.4 节：透视校正前后对照（与图4-1 同源案例；预裁切后 → 透视拉直；未触发预裁切或跳过透视时左右可能相近）",
+        resolve_fig4(4),
+        "图4-4　4.4 节：透视校正前后对照（案例：eg/case_4_4.png，强透视；未检出四边形时左右可能相近）",
         width=Inches(5.2),
     )
 
@@ -690,8 +700,8 @@ def build_docx() -> None:
     )
     add_thesis_figure(
         doc,
-        FIG4_5,
-        "图4-5　4.5 节：旋转纠偏前后对照（与图4-1 同源案例；左为透视后，右为纠偏后）",
+        resolve_fig4(5),
+        "图4-5　4.5 节：旋转纠偏前后对照（案例：eg/case_4_5.png，整页倾斜；左为透视后，右为纠偏后）",
         width=Inches(5.2),
     )
 
@@ -705,8 +715,8 @@ def build_docx() -> None:
     )
     add_thesis_figure(
         doc,
-        FIG4_6,
-        "图4-6　4.6 节：表格/标题 ROI 与小图增强（送 OCR 前）前后对照（与 preprocess_with_context 末两步一致；与图4-1 同源案例）",
+        resolve_fig4(6),
+        "图4-6　4.6 节：表格/标题 ROI 与小图增强（送 OCR 前）前后对照（案例：eg/case_4_6.png，由 case_4_5 纠偏后缩小）",
         width=Inches(5.2),
     )
 
@@ -781,139 +791,186 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
     )
     add_body_paragraph(
         doc,
-        "综上，第4章从像素层到服务层完成了“把不稳定成像变成稳定 OCR 输入”的主要工作，为第5章表格结构恢复提供了高质量的观测数据。",
+        "第4章至此说明如何将请求接入服务并调用解析入口；下一小节给出 OCR 侧统一的数据结构，使“识别到了什么”在代码中有明确、可序列化的形态，"
+        "并作为第5章表格恢复与业务解析的直接输入。",
+    )
+
+    add_heading(doc, "4.9　OCR 输出数据结构与中间表示", 2)
+    add_body_paragraph(
+        doc,
+        "recognize_text 将 PaddleOCR 各版本返回格式解析后，统一为不可变数据类 OCRItem：text 为识别字符串，confidence 为模型给出的置信度，"
+        "box 为四个顶点构成的平面四边形，顶点坐标为浮点数列表 [[x0,y0],…,[x3,y3]]，顺序与检测器输出一致。"
+        "一次整图（或 ROI）识别得到 List[OCRItem]，即若干条相互独立的文字条带观测；该列表本身不携带“第几行第几列”的表格语义，"
+        "也不保证阅读顺序，这正是第5章需要解决的“从几何观测到网格”的鸿沟。",
+    )
+    add_body_paragraph(
+        doc,
+        "在本项目中，该中间表示被多处复用：估计表格/标题包围盒与二次聚焦 ROI、从全图文本中正则抽取成绩单元信息、"
+        "将文本落入聚类或线网格单元格、以及对空数值格做局部补识别时的空间对齐。下列代码与示意与 backend/services/ocr_service.py 一致。",
+    )
+    add_code_block(
+        doc,
+        """@dataclass(frozen=True)
+class OCRItem:
+    text: str
+    confidence: float
+    box: List[List[float]]""",
+    )
+    add_code_block(
+        doc,
+        """# 示意：两张学生姓名附近的局部观测（坐标随图像分辨率变化）
+[
+  {"text": "姓名", "confidence": 0.98, "box": [[120.0, 40.0], [165.0, 38.0], [166.0, 62.0], [121.0, 64.0]]},
+  {"text": "张三", "confidence": 0.95, "box": [[118.0, 72.0], [158.0, 71.0], [159.0, 94.0], [119.0, 95.0]]}
+]""",
+    )
+    add_body_paragraph(
+        doc,
+        "表格结构恢复模块 recognize_table 在工程上的核心输出是二维字符串网格 List[List[str]]（行优先，单元格内文本可为拼接后的字符串），"
+        "再经 FileParserService._extract_class_grid 等步骤映射为对外 API 中的 headers 与 rows。"
+        "因此数据流可概括为：图像 → List[OCRItem] →（多路径）网格 → 业务字段；第5章仅分三节概述核心步骤，并附关键代码片段。",
     )
 
     add_heading(doc, "第5章　表格结构恢复与业务解析", 1)
-    add_heading(doc, "5.1　问题建模与多路径策略概述", 2)
     add_body_paragraph(
         doc,
-        "可将 OCR 输出抽象为若干文字实例，每个实例包含文本内容、置信度与平面四边形检测框。"
-        "表格恢复的目标是把检测框划分到离散的行列网格中，使同一单元格内语义一致且行列索引与视觉表格对齐。"
-        "由于成绩单成像条件多样，单一算法难以保证全局最优，故采用“轻量几何聚类 → 线结构约束 → 深度表格流水线兜底”的分级策略，"
-        "并以可解释的标量得分在路径间仲裁。",
+        "第4章末给出的 List[OCRItem] 仅描述“条带文字与框”，不含行列索引；本章将其收敛为 List[List[str]] 再映射为班级表业务字段。"
+        "下面依三条主线展开：多路径表格恢复（几何聚类、可选线网格、PaddleX{{2}} HTML 兜底及 _grid_score 仲裁）、解析管线与 _extract_class_grid（元信息、聚焦、表头与碎行、补识别等）、前端展示与 REST 契约。",
     )
 
-    add_heading(doc, "5.2　基于 OCR 检测框的行列聚类重建", 2)
+    add_heading(doc, "5.1　多路径表格恢复与路径决策", 2)
     add_body_paragraph(
         doc,
-        "_items_to_grid 首先将每个 OCRItem 映射为轴对齐包围盒与中心点，按 y 中心聚类为行：行内阈值 y_tol 与检测框中位高度相关，"
-        "可容忍轻微纵向抖动。行内再按 x 中心排序，并对全图 x 中心序列做一维聚类得到列中心，列间距阈值 x_tol 与中位宽度相关。"
-        "该方法对“截图类、列对齐明显”的班级表效果最佳，复杂度近似线性，适合作为默认主路径。",
+        "主路径为 _items_to_grid：将每个 OCRItem 转为轴对齐框与中心点，按 y 聚类为行、按 x 聚类为列，得到 grid_from_items，适合列对齐明显的截图类成绩单。"
+        "线结构分支对灰度图二值化后用形态学抽出长横线与长竖线，仅当竖线/横线主导度均较高且当前聚类分尚不理想时，将 mask 分解为单元格并调用 _line_cells_to_grid 将 OCR 文本落入格内。"
+        "若 _grid_score 仍不满意，则进入 PaddleX table_recognition：对 predict 结果中的 html 调用 _html_table_to_grid；该路径利于复杂表，但依赖重、冷启动慢。",
     )
     add_body_paragraph(
         doc,
-        "该路径的失效模式包括：密集小数字导致框粘连、强透视下同一行 y 中心离群、以及表头多行合并造成首行检测不全。"
-        "因此需要 _grid_score 与后续线结构/PaddleX{{2}}互为补充。",
-    )
-
-    add_heading(doc, "5.3　表格线提取与线网格结构恢复", 2)
-    add_body_paragraph(
-        doc,
-        "对灰度图二值化后，利用形态学分别保留长横线与长竖线，再融合得到 grid_mask；统计竖线/横线主导度 vertical_dominance、horizontal_dominance，"
-        "仅当二者均超过经验阈值时才认为“线结构可信”，进而将 mask 分解为单元格集合并调用 _line_cells_to_grid 将 OCR 文本落入格内。"
-        "该方法在纸质表格、线清晰场景下结构约束强，可减少 OCR 漏框带来的列错位。",
-    )
-    add_body_paragraph(
-        doc,
-        "其代价是对断线、弱线、复印淡化敏感；故实现中要求 line 路径在得分上显著优于 items 路径才切换，避免“画虎不成反类犬”。",
-    )
-
-    add_heading(doc, "5.4　PaddleX 表格流水线与 HTML 解析", 2)
-    add_body_paragraph(
-        doc,
-        "当聚类得分不足且线结构亦不可靠时，调用 paddlex.create_pipeline(\"table_recognition\") 获取 pred，读取 html 字段并用 BeautifulSoup{{11}}与 lxml 解析器配合解析表格节点{{2}}。"
-        "HTML 路径的优势在于对复杂合并单元格有一定归纳能力；劣势是依赖体积大、冷启动慢，且 HTML 转 grid 时需处理 rowspan/colspan 与空单元格。",
-    )
-
-    add_heading(doc, "5.5　网格质量评分与路径决策", 2)
-    add_body_paragraph(
-        doc,
-        "_grid_score 通过表头关键词（姓名、学号、班级、成绩等）命中数、行列规模、首行空单元惩罚等启发式加权，得到标量分数。"
-        "recognize_table 中若 score_items 已足够高则直接返回聚类结果；若线网格分数更高且满足阈值则返回线结果；否则进入 PaddleX；"
-        "若 HTML 解析网格分数仍不优则回退到较优的轻量路径。该决策链体现了工程上的“早停 + 兜底”。",
+        "_grid_score 用表头关键词命中、行列规模、首行空单元惩罚等加权为各候选网格打分；recognize_table 在分支间比较分数与阈值（如聚类分已较高则早停返回），体现先轻后重、择优回退。下列代码摘录与 backend/services/ocr_service.py 一致，为版面略有省略。",
     )
     add_code_block(
         doc,
         """def recognize_table(self, image_bgr, *, ocr_items=None, preprocess=True):
+    if preprocess:
+        image_bgr = self.preprocess_image(image_bgr)
     if ocr_items is None:
         ocr_items = self.recognize_text(image_bgr, preprocess=False)
     grid_from_items = self._items_to_grid(ocr_items)
     score_items = self._grid_score(grid_from_items)
-    ...
+
+    grid_from_lines = None
+    score_lines = 0
+    try:
+        gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+        bw = self._binarize_for_table(gray)
+        horiz, vert, grid_mask = self._extract_grid_lines(bw)
+        vertical_dominance = self._line_dominance(vert, axis="vertical")
+        horizontal_dominance = self._line_dominance(horiz, axis="horizontal")
+        line_confident = vertical_dominance >= 0.65 and horizontal_dominance >= 0.45
+        cells = self._grid_mask_to_cells(grid_mask) if line_confident else None
+        if cells and score_items < 40:
+            grid_from_lines = self._line_cells_to_grid(cells, ocr_items)
+            score_lines = self._grid_score(grid_from_lines)
+            if score_lines > score_items and score_lines >= 20:
+                return grid_from_lines
+    except Exception:
+        pass
+
     if score_items >= 20:
         return grid_from_items
-    engine = self._get_table_engine()
-    pred = engine.predict(image_bgr)
-    ...""",
+
+    try:
+        engine = self._get_table_engine()
+        pred = engine.predict(image_bgr)
+        out = list(pred)
+        if out and isinstance(out[0], dict):
+            html = out[0].get("html")
+            if html:
+                grid_from_html = self._html_table_to_grid(html)
+                score_html = self._grid_score(grid_from_html)
+                if score_html > max(score_items, score_lines):
+                    return grid_from_html
+    except Exception:
+        pass
+
+    best_grid = grid_from_items if score_items >= score_lines else grid_from_lines
+    return best_grid if best_grid and len(best_grid) >= 2 else None""",
     )
 
-    add_heading(doc, "5.6　二次聚焦 OCR 与解析管线", 2)
+    add_heading(doc, "5.2　解析管线与业务网格抽取", 2)
     add_body_paragraph(
         doc,
-        "FileParserService._parse_image 在得到首遍 ocr_items 后，根据文字分布估计表格包围盒 _estimate_focus_bbox，"
-        "对图像做裁剪并更新 transform_context。若 focused 为真，则在更小 ROI 上再次 recognize_text，相当于提高有效分辨率并削弱页脚、桌面的干扰。"
-        "该策略对“成绩只占画面中部”的手机竖拍图尤为有效。",
-    )
-    add_body_paragraph(
-        doc,
-        "随后将 ocr_items 与图像一并交给 recognize_table，再进入 _extract_class_grid：包括动态表头发现、别名归一化、空列剔除与行规范化等步骤，"
-        "最终输出与前端契约一致的 headers 与 rows。",
-    )
-
-    add_heading(doc, "5.7　表头识别、元信息与字段清洗", 2)
-    add_body_paragraph(
-        doc,
-        "元信息 _extract_transcript_meta 通过正则与关键词扫描 OCR 文本，抽取姓名、学号、班级、学院、学期等字段；"
-        "若表格 title 缺失可用 meta 中的标题补齐。字段清洗 _normalize_transcript_rows 负责全角半角、空白与常见 OCR 混淆字符的归一，"
-        "减少导出 Excel 后的二次手工清洗。",
-    )
-
-    add_heading(doc, "5.8　碎行合并、单元格区域估计与数字补识别", 2)
-    add_body_paragraph(
-        doc,
-        "碎行合并解决“同一学生一行被切成两行且列上互补”的拍照畸变：通过比较相邻行非空列集合是否不相交，并结合列索引单调性判断是否应拼接。"
-        "单元格区域估计 _estimate_cell_regions 通过估计表格主轴与行列边界，生成整格多边形，使高亮框覆盖视觉单元格而非仅文字外包矩形。",
-    )
-    add_body_paragraph(
-        doc,
-        "_recover_numeric_cells 对仍为空的数值格，优先利用已有 OCR 框重叠推断；失败则 _run_local_cell_ocr：裁块、加白边、放大后局部再识别。"
-        "该机制针对小数与窄列数字显著降低漏识率，是相比“只跑一遍整图 OCR”的重要工程增量。",
-    )
-
-    add_heading(doc, "5.9　前端高亮联动与 Excel 导出", 2)
-    add_body_paragraph(
-        doc,
-        "前端根据预览模式选择 points 或 processed_points，使用 SVG 覆盖层绘制多边形，实现“点表格、看图”的闭环校对。"
-        "导出时 ExcelService 借助 openpyxl{{10}}写入标题行（可选合并单元格）、表头样式、冻结首行与自动筛选，并对纯数字成绩尝试解析为数值类型以便后续求和统计。",
-    )
-
-    add_heading(doc, "5.10　上传接口 JSON 返回格式与数据处理", 2)
-    add_body_paragraph(
-        doc,
-        "POST /upload 在解析成功时返回 application/json。班级成绩表走通表格恢复后，主体字段包括：headers 为字符串数组，表示列名；"
-        "rows 为对象数组，每一行通常包含 values（列名到单元格值的映射）、confidences（同结构的置信度），"
-        "以及可选的 boxes（列名到平面多边形顶点列表，用于前端在原图或预处理图上绘制高亮）。"
-        "另可包含 title（表题）、header_boxes（表头区域框）、meta（由 OCR 文本正则抽取的姓名、学号、班级等键值对），"
-        "以及 processed_preview（以 data:image/png;base64,... 形式内嵌的预处理预览图，便于对照纠错）。",
-    )
-    add_body_paragraph(
-        doc,
-        "数据处理上，FileParserService._parse_image 先 decode_image 与 preprocess_with_context，再 recognize_text 得到 ocr_items；"
-        "可选二次聚焦后再次识别；随后 recognize_table 走多路径表格恢复，并由 _extract_class_grid 完成表头归一、空列剔除、碎行合并、"
-        "单元格区域估计、数值格补识别与字段清洗，最终组装为上述 JSON。前端将 headers/rows 绑定到可编辑表格，"
-        "用 boxes 与 transform_context 将多边形映射到用户选择的坐标系；导出时再把用户编辑后的同一结构 POST 至 /export。",
+        "FileParserService._parse_image 将第4章预处理、OCR 与上一节 recognize_table 串成一条可执行链：先后 recognize_text、_extract_transcript_meta、可选 _focus_table_region 与二次 recognize_text；"
+        "再将 ocr_items 与当前图传入 recognize_table；若得到合法二维表则进入 _extract_class_grid，在其中完成动态表头、别名归一、空列剔除、碎行合并、_estimate_cell_regions、_recover_numeric_cells 与 _normalize_transcript_rows；"
+        "其中 _extract_class_grid 返回前会调用 _strip_highlight_fields，去掉仅服务内部的单元格多边形等字段。失败则走 _extract_from_text_lines_fallback。下列为核心骨架（摘自 backend/services/parser_service.py）。",
     )
     add_code_block(
         doc,
-        """// 典型成功响应（字段视样本略有增减）
+        """def _parse_image(self, data: bytes) -> Dict[str, Any]:
+    image_bgr = self.ocr_service.decode_image(data)
+    preprocess_result = self.ocr_service.preprocess_with_context(image_bgr)
+    image_bgr = preprocess_result["image"]
+    transform_context = preprocess_result["context"]
+    image_size = transform_context["original_size"] if transform_context else None
+
+    ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
+    meta = self._extract_transcript_meta(ocr_items)
+    image_bgr, transform_context, focused = self._focus_table_region(
+        image_bgr, ocr_items, transform_context
+    )
+    if focused:
+        ocr_items = self.ocr_service.recognize_text(image_bgr, preprocess=False)
+        meta = self._extract_transcript_meta(ocr_items)
+
+    try:
+        table = self.ocr_service.recognize_table(
+            image_bgr, ocr_items=ocr_items, preprocess=False
+        )
+    except Exception:
+        table = None
+
+    if table and len(table) >= 2:
+        result = self._extract_class_grid(
+            table,
+            image_bgr=image_bgr,
+            ocr_items=ocr_items,
+            default_conf=0.85,
+            image_size=image_size,
+            transform_context=transform_context,
+        )
+        result["processed_preview"] = self._encode_preview_image(image_bgr)
+        if meta:
+            result["meta"] = meta
+            if not result.get("title") and meta.get("标题"):
+                result["title"] = str(meta["标题"]).strip()
+        return result
+
+    result = self._extract_from_text_lines_fallback(
+        [it.text for it in ocr_items],
+        meta=meta,
+        image_size=image_size,
+        ocr_items=ocr_items,
+    )
+    result["processed_preview"] = self._encode_preview_image(image_bgr)
+    return result""",
+    )
+
+    add_heading(doc, "5.3　交互、导出与接口数据契约", 2)
+    add_body_paragraph(
+        doc,
+        "前端静态页提供上传、原图与预处理预览（可放大）、可编辑表格及按 confidences 的低分标红；用户确认后 POST /export，由 openpyxl{{10}} 写入样式化的 xlsx。"
+        "相对 4.9 的逐条 OCRItem，POST /upload 成功体收敛为 headers、rows（含 values 与 confidences）、可选 title、meta、processed_preview；单元格多边形等不再下发。",
+    )
+    add_code_block(
+        doc,
+        """// 典型成功响应（字段视样本略有增减；不含单元格多边形）
 {
   "headers": ["姓名", "班级", "平时成绩", "期末成绩"],
   "rows": [
     {
       "values": {"姓名": "张三", "班级": "计科1班", "平时成绩": 88, "期末成绩": 90},
-      "confidences": {"姓名": 0.99, "班级": 0.97, "平时成绩": 0.95, "期末成绩": 0.96},
-      "boxes": {"姓名": [[x1,y1], ...], ...}
+      "confidences": {"姓名": 0.99, "班级": 0.97, "平时成绩": 0.95, "期末成绩": 0.96}
     }
   ],
   "title": "…",
@@ -923,115 +980,58 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
     )
 
     add_heading(doc, "第6章　系统实现、测试与实验分析", 1)
-    add_heading(doc, "6.1　实现环境与工具链", 2)
     add_body_paragraph(
         doc,
-        "开发机与实验机建议配置为：Windows 10/11 64 位、16GB 及以上内存、支持 AVX 的 x64 CPU；Python 3.9 及以上虚拟环境。"
-        "关键依赖包括 fastapi、uvicorn[standard]、paddleocr、paddlepaddle、opencv-python、openpyxl{{10}}、beautifulsoup4{{11}}、lxml；"
-        "若需 SVG 栅格化则依赖 cairosvg。环境变量 PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK 可按官方说明关闭模型源检查以加速冷启动。",
-    )
-    add_body_paragraph(
-        doc,
-        "工程目录中 backend 为服务代码，frontend 为静态资源，tests 为单元测试，tools 含辅助脚本。"
-        "启动命令为 `python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000`，浏览器访问 http://localhost:8000/ 进入主界面。",
+        "本章按“如何运行系统 → 如何用 unittest 做回归验证 → 如何用插图佐证界面与预处理效果 → 如何归纳模块分工与部署注意点”的顺序组织，"
+        "与第4章、第5章的算法叙述形成“可运行、可验证、可展示”的收尾。",
     )
 
-    add_heading(doc, "6.2　系统功能实现与运行说明", 2)
+    add_heading(doc, "6.1　实现环境与部署运行", 2)
     add_body_paragraph(
         doc,
-        "功能实现上，上传模块使用浏览器 FormData 调用 /upload；解析完成后右侧表格组件渲染 headers 与 rows，低置信度单元格可在前端标红提示；"
-        "预览区支持切换原图与预处理图，辅助判断预处理是否过度或不足。导出模块将当前表格序列化为 JSON POST 至 /export，成功后跳转下载链接。",
+        "建议开发与实验环境为 Windows 10/11 64 位、16GB 及以上内存、支持 AVX 的 x64 CPU，Python 3.9 及以上虚拟环境。"
+        "关键依赖与仓库 requirements 一致：fastapi、uvicorn[standard]、paddleocr、paddlepaddle、opencv-python、openpyxl{{10}}、beautifulsoup4{{11}}、lxml 等；"
+        "若需 SVG 栅格化可补充 cairosvg。可按官方说明设置 PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK 以减轻表格流水线冷启动时的模型源检查开销。",
     )
     add_body_paragraph(
         doc,
-        "异常路径包括：空文件、无法解码图片、不支持的扩展名、OCR 内部错误等，前端应捕获 HTTP 状态码并提示用户更换素材或缩小图片体积。",
+        "代码布局：backend 为 FastAPI 应用与领域服务（OCRService、FileParserService、ExcelService），frontend 为静态资源，tests 为回归用例，"
+        "tools 含论文插图流水线等辅助脚本。启动命令为 "
+        "`python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000`，浏览器访问 http://localhost:8000/ 进入主界面。",
     )
 
-    add_heading(doc, "6.3　测试方案与单元测试", 2)
+    add_heading(doc, "6.2　端到端功能与流程说明", 2)
     add_body_paragraph(
         doc,
-        "测试分为三类：其一，接口测试 tests/test_api.py，验证 /upload、/export、/health 的契约与错误码；"
-        "其二，解析测试 tests/test_parser_service.py，对合成表格 JSON 与样例图像（若仓库内置）做回归；其三，导出测试 tests/test_excel_service.py，"
-        "检查生成文件是否包含冻结窗格、筛选与基本样式。",
+        "从用户视角，一次完整使用闭环为：选择 PNG/JPG/SVG/XLSX → POST /upload → 查看原图与预处理预览并对照右侧可编辑表格 → 修正低置信度单元格 → POST /export 下载 xlsx。"
+        "与第3章需求一致：图像类输入走 decode、preprocess_with_context、recognize_text 得到 List[OCRItem]，再经聚焦（可选）、recognize_table 与 _extract_class_grid 得到 headers/rows；"
+        "JSON 中不包含服务端内部用过的单元格多边形，仅保留业务字段与 confidences，见第5章。",
     )
     add_body_paragraph(
         doc,
-        "运行 `python -m unittest discover -s tests -v` 应全部通过；建议在论文附录粘贴命令行绿色通过截图，并列出主要断言逻辑的文字说明。",
+        "异常路径包括空文件、无法解码、扩展名不在支持列表、OCR 或表格引擎内部异常等；路由层将错误映射为 4xx/5xx，前端宜统一提示并建议用户缩小体积或更换素材。",
     )
 
-    add_heading(doc, "6.4　实验数据集与对比基线", 2)
+    add_heading(doc, "6.3　自动化测试与回归验证", 2)
     add_body_paragraph(
         doc,
-        "实验数据建议划分为：A 类教务截图（列对齐、线清晰）、B 类手机斜拍（透视与阴影明显）、C 类扫描件（噪声与黑边）、D 类弱线或无边框表。"
-        "每类至少收集若干张经脱敏处理的样本，并记录分辨率与拍摄设备。对比基线包括：B1 纯人工录入耗时与错误类型统计；"
-        "B2 不做预处理、不调表格结构，仅调用通用 OCR 并按阅读顺序输出；B3 使用本系统但关闭二次聚焦与数字补识别，以观察模块贡献。",
-    )
-    add_body_paragraph(
-        doc,
-        "为便于答辩材料与论文插图一致，可用与第4章相同的案例图「Snipaste_2026-04-13_10-26-13.png」作为代表性 A 类（教务桌面截图类）样本，经与本系统一致的 preprocess_with_context 得到线上 /upload 实际输入。"
-        "图6-4 给出该样本原图与完整预处理后图像的左右对照，插入位置建议：紧接本段“数据集划分与基线说明”之后，用于直观对应 B2 与 B3 讨论中的输入差异。"
-        "其中 B2 可理解为仅在原图或弱预处理图上调用通用 OCR；B3 则保留几何与表格管线但关闭二次聚焦与数字补识别，以量化聚焦与补识别模块的边际收益。",
-    )
-    add_thesis_figure(
-        doc,
-        FIG6_4_A,
-        "图6-4　实验用案例（与第4章同源）：原图与 preprocess_with_context 输出对照（与线上一致）",
-        width=Inches(5.4),
-    )
-    add_body_paragraph(
-        doc,
-        "若需单独展示经流水线裁切增强后的整幅预处理结果（不含左右拼接），可将 out/test2/01_full_preprocess_pipeline.png 作为附图或附录材料；"
-        "论文字数受限时也可仅用图6-4 一幅完成说明。",
-    )
-    add_thesis_figure(
-        doc,
-        FIG6_4_B,
-        "图6-4（附）　同一案例经完整预处理后的单幅结果（可选排版）",
-        width=Inches(4.2),
+        "tests/test_api.py 覆盖 /upload、/export、/health 的契约与典型错误码；tests/test_parser_service.py 对解析结果结构做回归；"
+        "tests/test_excel_service.py 检查导出工作簿的冻结窗格、筛选与基本样式。仓库根目录执行 `python -m unittest discover -s tests -v` 应全部通过，"
+        "适合纳入持续集成，作为依赖升级后的第一道闸门。答辩材料中可附录命令行全绿截图，与正文相互印证。",
     )
 
-    add_heading(doc, "6.5　对比实验与结果分析", 2)
+    add_heading(doc, "6.4　系统界面与实验插图", 2)
     add_body_paragraph(
         doc,
-        "为量化“相对传统方法的优势”，建议从工程可实现角度设置三类对照：（A）人工对照录入，记录单表耗时与笔误类型；"
-        "（B）不做预处理与表格恢复的“整图单次通用 OCR”，将输出按阅读顺序拼接为纯文本；（C）仅保留检测框聚类、关闭二次聚焦与数字补识别的简化管线。"
-        "在每一类输入子集上统计单元格准确率、表头对齐率、需人工修正次数与端到端时延，并保留失败样例截图用于误差分析。",
-    )
-    add_body_paragraph(
-        doc,
-        "定性上，本文系统预期在以下维度优于（B）：透视与背景干扰下的鲁棒性、短数字与小数点召回、直接可编辑的二维结构；"
-        "相对（A）则显著降低时间成本；相对（C）则体现二次聚焦与补识别模块的边际收益。下表给出答辩前可填写的对比框架（表中数值需用自有样本实测替换）。",
+        "插图按阅读顺序编排：图6-1 为整页主界面；图6-2 为识别结果表格特写；图6-3 为固定样本原图与 preprocess_with_context 输出对照（与 /upload 输入一致）；"
+        "图6-4 为同一样本完整预处理后的单幅结果（可选，版芯紧张时可省略）。印刷前可将 PNG 换为高分辨率截图；图6-3、图6-4 可与第4章预处理各节叙述对照阅读。",
     )
 
-    tbl = doc.add_table(rows=5, cols=4)
-    tbl.style = "Table Grid"
-    hdr = ["对比项", "人工录入", "传统整图 OCR", "本文系统"]
-    for j, h in enumerate(hdr):
-        tbl.rows[0].cells[j].text = h
-    rows_cmp = [
-        ("结构化表格", "高（但成本高）", "低", "高"),
-        ("几何畸变适应", "人眼强依赖", "弱", "较强（透视/纠偏）"),
-        ("小数字/易漏字段", "依赖细心", "易漏", "局部补识别增强"),
-        ("可解释校对", "无自动提示", "弱", "置信度+框选高亮"),
-    ]
-    for i, row in enumerate(rows_cmp, start=1):
-        for j, cell in enumerate(row):
-            tbl.rows[i].cells[j].text = cell
-    doc.add_paragraph()
-
-    add_body_paragraph(
+    add_figure_placeholder(
         doc,
-        "由上表可见，本文系统在保持较高结构化输出的同时，将大量几何与版面理解工作自动化，并通过人机协同界面降低纠错成本；"
-        "相较纯人工方式显著缩短录入时间，相较 naive OCR 又明显减少了行列错位与字段丢失问题。"
-        "若实验结果在 D 类弱线表上仍波动较大，可在第7章展望中明确作为后续模型升级的重点方向。",
+        "【图6-1 插入位置】系统 Web 主界面全屏截图：上传区、原图与预处理预览、右侧可编辑表格同框。",
     )
 
-    add_heading(doc, "6.6　运行截图与界面展示", 2)
-    add_body_paragraph(
-        doc,
-        "图6-1 给出班级成绩片段经识别后的表格展示效果（姓名、班级、平时成绩等列结构清晰），对应原始文件 Snipaste_2026-02-24_19-13-43.png；"
-        "已在下节插入 Word 图片对象，印刷前可替换为更高分辨率截图。图6-2、图6-3 请补充整页主界面与高亮联动效果。",
-    )
     if FIG_SRC.exists():
         doc.add_paragraph()
         pic_p = doc.add_paragraph()
@@ -1039,46 +1039,53 @@ async def upload(file: UploadFile = File(...)) -> JSONResponse:
         pic_p.add_run().add_picture(str(FIG_SRC), width=Inches(5.2))
         cap = doc.add_paragraph()
         cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        cr = cap.add_run("图6-1　系统识别结果示例（表格展示）")
+        cr = cap.add_run("图6-2　识别结果示例：班级成绩片段表格展示（可替换为自有截图）")
         set_run_font(cr, east_asia="宋体", ascii_font="Times New Roman", size=Pt(10.5))
     else:
-        add_figure_placeholder(doc, "【图6-1】未找到截图文件，请将 Snipaste_2026-02-24_19-13-43.png 置于指定路径后重新生成。")
+        add_figure_placeholder(
+            doc,
+            "【图6-2】请将识别结果表格截图置于 generate_thesis_2252733.py 中 FIG_SRC 路径，或生成后手工插入。",
+        )
 
     add_figure_placeholder(
         doc,
-        "【图6-2 插入位置】请插入：系统 Web 主界面全屏截图（含上传区、原图/预处理预览、右侧可编辑表格）。",
-    )
-    add_figure_placeholder(
-        doc,
-        "【图6-3 插入位置】请插入：点击单元格后左侧高亮联动的截图（展示反投影或多边形框选效果）。",
+        "【可选配图】低置信度标红单元格与编辑态特写；若不单独占版面，建议与图6-1 合并为一张截图，仍统称图6-1。",
     )
 
-    add_heading(doc, "6.7　算法归纳、消融讨论、性能瓶颈与可维护性", 2)
+    add_thesis_figure(
+        doc,
+        FIG6_4_A,
+        "图6-3　实验用样本：原图与 preprocess_with_context 输出对照（与线上 /upload 一致；第4章分节案例见 eg/fig_4_*.png）",
+        width=Inches(5.4),
+    )
+    add_thesis_figure(
+        doc,
+        FIG6_4_B,
+        "图6-4　同一样本经完整预处理后的单幅结果（可选；默认来自 out/test2/01_full_preprocess_pipeline.png）",
+        width=Inches(4.2),
+    )
+
+    add_heading(doc, "6.5　消融讨论、性能与改进方向", 2)
     add_body_paragraph(
         doc,
-        "算法层面，检测与识别由 PaddleOCR 深度模型承担，角度分类器改善旋转样本；几何与表格线部分由 OpenCV 经典算子承担，负责把输入变换到模型友好域；"
-        "结构歧义由多路径评分与PaddleX{{2}}兜底消化。三者分工使系统兼具数据驱动与可解释规则的优点。",
+        "与第5章模块的对应关系如下：检测与识别由 PaddleOCR 承担，cls 改善倒置行；几何与表格线由 OpenCV 经典算子承担；结构歧义由多路径评分与 PaddleX{{2}} 兜底。"
+        "若需做消融，可在实现中分别旁路：白纸裁切、透视校正、二次聚焦、线结构分支、PaddleX 兜底、数字补识别，在典型样本（如斜拍、弱线表）上对比解析结果与耗时。",
     )
     add_body_paragraph(
         doc,
-        "消融上，可分别关闭：白纸裁切、透视校正、二次聚焦、线结构分支、PaddleX 兜底、数字补识别，观察各模块在 B 类斜拍样本上的分数变化。"
-        "经验上，斜拍样本对透视与聚焦更敏感；截图样本对聚类主路径更友好。",
+        "性能与部署方面：CPU 推理受线程数、模型缓存与输入分辨率影响；PaddleX 首次 predict 往往显著慢于热路径，宜区分冷启动与稳态耗时表述。"
+        "响应体中的 processed_preview 为 Base64 内嵌图，会放大 JSON；弱网环境可改为对象存储 URL 或缩略图策略。",
     )
     add_body_paragraph(
         doc,
-        "性能方面，CPU 推理受线程数、模型加载缓存与图像分辨率影响显著；PaddleX 首次调用可能触发较重的模型准备，应在论文中如实说明并给出冷启动与热启动两次计时。"
-        "内存方面，Base64 预览图会放大 JSON 体积，若部署到弱网环境可改为对象存储外链。",
-    )
-    add_body_paragraph(
-        doc,
-        "可维护性方面，tests 目录下的 unittest 用例为回归提供抓手；建议在持续集成中启用同一命令，以避免依赖升级引入静默行为变化。"
-        "论文答辩材料中可再次附录测试通过截图，与第6.3节文字相互印证。",
+        "可维护性方面：以 unittest 全量 discover 作为接口与核心逻辑的回归抓手；依赖或 Paddle 版本升级后应先跑测试再验收界面。"
+        "答辩材料中测试通过截图建议与第6.3节相互引用。",
     )
 
     add_heading(doc, "第7章　总结与展望", 1)
     add_body_paragraph(
         doc,
-        "本文完成了面向学生成绩单场景的端到端识别系统，涵盖预处理、OCR、多路径表格恢复、解析纠错与前后端联调。"
+        "本文完成了面向学生成绩单场景的端到端识别系统，涵盖预处理、OCR、多路径表格恢复、解析纠错与浏览器端校对导出。"
         "不足之处在于：极端反光、严重卷曲、手写批注等样本仍具挑战；PaddleX{{2}}兜底路径计算开销较大。"
         "后续可探索轻量表格 Transformer、主动学习筛选难例，以及与教务 API 的直连同步{{5}}。",
     )
@@ -1128,12 +1135,12 @@ def main() -> None:
     OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
     copies: list[tuple[Path, Path]] = [
         (FIG_SRC, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe6-1.png"),
-        (FIG4_1, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-1.png"),
-        (FIG4_2, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-2.png"),
-        (FIG4_3, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-3.png"),
-        (FIG4_4, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-4.png"),
-        (FIG4_5, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-5.png"),
-        (FIG4_6, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-6.png"),
+        (resolve_fig4(1), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-1.png"),
+        (resolve_fig4(2), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-2.png"),
+        (resolve_fig4(3), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-3.png"),
+        (resolve_fig4(4), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-4.png"),
+        (resolve_fig4(5), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-5.png"),
+        (resolve_fig4(6), OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe4-6.png"),
         (FIG6_4_A, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe6-4a.png"),
         (FIG6_4_B, OUTPUT_ROOT / "2252733-\u8bba\u6587-\u56fe6-4b.png"),
     ]

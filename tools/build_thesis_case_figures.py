@@ -9,6 +9,8 @@
 若不存在则依次回退到 qq_pic 合并图、IMG 拍照样例、DEFAULT_CASE、白边截图、旋转样例路径。
 
 运行：在仓库根目录 python tools/build_thesis_case_figures.py
+
+多案例（4.1—4.6 各节专用合成图与对照）：python tools/build_chapter4_eg_figures.py → 写入 eg/case_4_*.png 与 eg/fig_4_*.png。
 """
 from __future__ import annotations
 
