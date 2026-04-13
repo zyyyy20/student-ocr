@@ -5,8 +5,8 @@
   本脚本仍写入 out/test1/preprocess_by_section/ 同名文件以便与 out/test1 阶段图并存；逻辑为 write_chapter4_pair_figures（与 preprocess_stage_snapshots 一致）
 - out/test1/、out/test2/：同一主案例的阶段导出与整线对比（test2 为 preprocess_with_context 端到端）
 
-主案例（优先）：仓库根目录 IMG_20260412_225722.jpg（班级平时成绩表拍照，含轻微透视与倾斜）。
-若不存在则依次回退到 DEFAULT_CASE、白边截图、旋转样例路径。
+主案例（优先）：仓库根目录 Snipaste_2026-04-13_10-26-13.png（班级平时成绩表截图）。
+若不存在则依次回退到 qq_pic 合并图、IMG 拍照样例、DEFAULT_CASE、白边截图、旋转样例路径。
 
 运行：在仓库根目录 python tools/build_thesis_case_figures.py
 """
@@ -24,7 +24,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 论文与插图统一主案例（与 generate_thesis_2252733.py 正文描述一致）
-PRIMARY_CASE = ROOT / "IMG_20260412_225722.jpg"
+PRIMARY_CASE = ROOT / "Snipaste_2026-04-13_10-26-13.png"
+CASE_FALLBACK_QQ = ROOT / "qq_pic_merged_1776046640446.jpg"
+CASE_FALLBACK_IMG = ROOT / "IMG_20260412_225722.jpg"
 DEFAULT_CASE = Path(r"C:\Users\zy\Desktop\{F96D111D-6FF3-46e7-AA5B-74A534B582D8}.png")
 CASE_ROTATED = Path(r"C:\Users\zy\Desktop\IMG_20260412_212902.png")
 CASE_WHITEBORDER = Path(r"C:\Users\zy\Desktop\Snipaste_2026-04-12_21-31-16.png")
@@ -229,7 +231,7 @@ def _stages(ocr, img: np.ndarray) -> dict:
 
 def _pick_primary_image(ocr) -> tuple[np.ndarray, str] | None:
     """返回 (BGR 图, 用于日志的源路径说明)。"""
-    for path in (PRIMARY_CASE, DEFAULT_CASE, CASE_WHITEBORDER, CASE_ROTATED):
+    for path in (PRIMARY_CASE, CASE_FALLBACK_QQ, CASE_FALLBACK_IMG, DEFAULT_CASE, CASE_WHITEBORDER, CASE_ROTATED):
         if not path.exists():
             continue
         img = _load_bgr(ocr, path)

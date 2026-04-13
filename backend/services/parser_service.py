@@ -450,7 +450,16 @@ class FileParserService:
             result["header_boxes"] = header_boxes
         if title_text:
             result["title"] = title_text
+        self._strip_highlight_fields(result)
         return result
+
+    @staticmethod
+    def _strip_highlight_fields(result: Dict[str, Any]) -> None:
+        """不上传/返回用于前端 SVG 高亮的多边形字段，内部解析仍可用 boxes 做补识别。"""
+        result.pop("header_boxes", None)
+        for row in result.get("rows") or []:
+            if isinstance(row, dict):
+                row.pop("boxes", None)
 
     @staticmethod
     def _normalize_header_name(name: str) -> str:
@@ -1199,6 +1208,7 @@ class FileParserService:
             result["meta"] = meta
             if meta.get("标题"):
                 result["title"] = meta["标题"]
+        self._strip_highlight_fields(result)
         return result
 
     @staticmethod

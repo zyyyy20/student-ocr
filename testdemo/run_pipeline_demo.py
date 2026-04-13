@@ -44,7 +44,7 @@ def main() -> int:
     ocr = OCRService()
     picked = _pick_primary_image(ocr)
     if picked is None:
-        print("无可用样例图像，请放置 IMG_20260412_225722.jpg 或调整 tools/build_thesis_case_figures.py 中的回退路径。")
+        print("无可用样例图像，请放置 Snipaste_2026-04-13_10-26-13.png（或回退样例）或调整 tools/build_thesis_case_figures.py 中的路径。")
         return 1
 
     im, name = picked

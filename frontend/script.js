@@ -6,7 +6,6 @@ const statusEl = document.getElementById("status");
 const previewEl = document.getElementById("preview");
 const processedPreviewEl = document.getElementById("processedPreview");
 const processedPreviewCardEl = document.getElementById("processedPreviewCard");
-const previewModeSelect = document.getElementById("previewMode");
 const tbody = document.getElementById("tbody");
 const thead = document.getElementById("thead");
 const addRowBtn = document.getElementById("addRowBtn");
@@ -19,21 +18,17 @@ const lowCountEl = document.getElementById("lowCount");
 const riskColumnSelect = document.getElementById("riskColumn");
 const resultTitleEl = document.getElementById("resultTitle");
 const resultMetaEl = document.getElementById("resultMeta");
+const imageLightbox = document.getElementById("imageLightbox");
+const imageLightboxImg = document.getElementById("imageLightboxImg");
+const imageLightboxCaption = document.getElementById("imageLightboxCaption");
 
 let selectedFile = null;
+let imageLightboxOpen = false;
 let currentHeaders = [];
 let threshold = Number(thresholdInput?.value ?? 0.85);
 let currentTitle = "";
 let currentMeta = {};
-let currentHeaderBoxes = {};
 let currentProcessedPreview = "";
-let currentHighlightShape = null;
-let previewMode = previewModeSelect?.value || "original";
-
-let previewImageEl = null;
-let previewOverlayEl = null;
-let processedPreviewImageEl = null;
-let processedPreviewOverlayEl = null;
 
 function setStatus(text, type = "") {
   statusEl.textContent = text;
@@ -72,14 +67,71 @@ function setFileMeta(file) {
   fileMetaEl.textContent = `已选择：${file.name}（${formatBytes(file.size)}）`;
 }
 
-function syncPreviewModeUI() {
-  const hasProcessedPreview = Boolean(currentProcessedPreview);
-  if (processedPreviewCardEl) {
-    processedPreviewCardEl.classList.toggle(
-      "hidden",
-      !(previewMode === "processed" && hasProcessedPreview)
-    );
+function syncProcessedPreviewCardVisibility() {
+  if (!processedPreviewCardEl) return;
+  processedPreviewCardEl.classList.toggle("hidden", !currentProcessedPreview);
+}
+
+function openImageLightbox(src, altText) {
+  if (!imageLightbox || !imageLightboxImg || !src) return;
+  imageLightboxImg.src = src;
+  imageLightboxImg.alt = altText || "";
+  if (imageLightboxCaption) {
+    imageLightboxCaption.textContent = altText || "";
   }
+  imageLightbox.classList.remove("hidden");
+  imageLightboxOpen = true;
+  document.body.style.overflow = "hidden";
+  imageLightbox.querySelector(".image-lightbox-close")?.focus();
+}
+
+function closeImageLightbox() {
+  if (!imageLightbox || !imageLightboxImg) return;
+  imageLightbox.classList.add("hidden");
+  imageLightboxImg.src = "";
+  imageLightboxImg.alt = "";
+  if (imageLightboxCaption) imageLightboxCaption.textContent = "";
+  imageLightboxOpen = false;
+  document.body.style.overflow = "";
+}
+
+function bindImageLightbox() {
+  const backdrop = imageLightbox?.querySelector(".image-lightbox-backdrop");
+  const closeBtn = imageLightbox?.querySelector(".image-lightbox-close");
+
+  function activateFromImg(img) {
+    if (!img?.src) return;
+    openImageLightbox(img.src, img.alt || "预览");
+  }
+
+  previewEl?.addEventListener("click", (e) => {
+    const img = e.target.closest("img.preview-zoomable");
+    if (img) activateFromImg(img);
+  });
+  processedPreviewEl?.addEventListener("click", (e) => {
+    const img = e.target.closest("img.preview-zoomable");
+    if (img) activateFromImg(img);
+  });
+
+  const onPreviewKey = (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const img = e.target.closest("img.preview-zoomable");
+    if (!img) return;
+    e.preventDefault();
+    activateFromImg(img);
+  };
+  previewEl?.addEventListener("keydown", onPreviewKey);
+  processedPreviewEl?.addEventListener("keydown", onPreviewKey);
+
+  backdrop?.addEventListener("click", closeImageLightbox);
+  closeBtn?.addEventListener("click", closeImageLightbox);
+
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && imageLightboxOpen) {
+      e.preventDefault();
+      closeImageLightbox();
+    }
+  });
 }
 
 function refreshLowConfidenceSummary() {
@@ -122,13 +174,7 @@ function renderMeta(meta = {}) {
     .join("");
 }
 
-function clearPreviewHighlight() {
-  currentHighlightShape = null;
-  if (previewOverlayEl) previewOverlayEl.innerHTML = "";
-  if (processedPreviewOverlayEl) processedPreviewOverlayEl.innerHTML = "";
-}
-
-function renderImagePreview(container, src, alt, onLoad) {
+function renderImagePreview(container, src, alt) {
   container.innerHTML = "";
 
   const stage = document.createElement("div");
@@ -137,22 +183,17 @@ function renderImagePreview(container, src, alt, onLoad) {
   const img = document.createElement("img");
   img.src = src;
   img.alt = alt;
-  if (onLoad) img.addEventListener("load", onLoad);
-
-  const overlay = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  overlay.classList.add("preview-overlay");
+  img.classList.add("preview-zoomable");
+  img.tabIndex = 0;
+  img.title = "点击放大预览";
 
   stage.appendChild(img);
-  stage.appendChild(overlay);
   container.appendChild(stage);
-  return { img, overlay };
+  return img;
 }
 
 function renderPreview(file) {
   previewEl.innerHTML = "";
-  previewImageEl = null;
-  previewOverlayEl = null;
-  clearPreviewHighlight();
 
   if (!file) {
     previewEl.innerHTML = `<div class="preview-placeholder">等待上传</div>`;
@@ -163,13 +204,7 @@ function renderPreview(file) {
   const url = URL.createObjectURL(file);
 
   if (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")) {
-    const rendered = renderImagePreview(previewEl, url, "原图预览", () => {
-      if (currentHighlightShape && previewMode === "original") {
-        showPreviewHighlight(currentHighlightShape);
-      }
-    });
-    previewImageEl = rendered.img;
-    previewOverlayEl = rendered.overlay;
+    renderImagePreview(previewEl, url, "原图预览");
     return;
   }
 
@@ -194,73 +229,15 @@ function renderProcessedPreview(dataUrl) {
   if (!processedPreviewEl) return;
 
   processedPreviewEl.innerHTML = "";
-  processedPreviewImageEl = null;
-  processedPreviewOverlayEl = null;
 
   if (!dataUrl) {
     processedPreviewEl.innerHTML = `<div class="preview-placeholder">等待识别</div>`;
-    syncPreviewModeUI();
+    syncProcessedPreviewCardVisibility();
     return;
   }
 
-  const rendered = renderImagePreview(processedPreviewEl, dataUrl, "预处理后预览", () => {
-    if (currentHighlightShape && previewMode === "processed") {
-      showPreviewHighlight(currentHighlightShape);
-    }
-  });
-  processedPreviewImageEl = rendered.img;
-  processedPreviewOverlayEl = rendered.overlay;
-  syncPreviewModeUI();
-}
-
-function drawPolygonOnPreview(targetContainer, targetImage, targetOverlay, points) {
-  const containerWidth = targetContainer.clientWidth;
-  const containerHeight = targetContainer.clientHeight;
-  const naturalWidth = targetImage.naturalWidth || 0;
-  const naturalHeight = targetImage.naturalHeight || 0;
-
-  if (!containerWidth || !containerHeight || !naturalWidth || !naturalHeight) {
-    targetOverlay.innerHTML = "";
-    return;
-  }
-
-  const scale = Math.min(containerWidth / naturalWidth, containerHeight / naturalHeight);
-  const displayWidth = naturalWidth * scale;
-  const displayHeight = naturalHeight * scale;
-  const offsetX = (containerWidth - displayWidth) / 2;
-  const offsetY = (containerHeight - displayHeight) / 2;
-
-  targetOverlay.setAttribute("viewBox", `0 0 ${containerWidth} ${containerHeight}`);
-  targetOverlay.setAttribute("width", `${containerWidth}`);
-  targetOverlay.setAttribute("height", `${containerHeight}`);
-  targetOverlay.innerHTML = "";
-
-  const polygon = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-  const pointsAttr = points
-    .map((point) => `${offsetX + point.x * displayWidth},${offsetY + point.y * displayHeight}`)
-    .join(" ");
-  polygon.setAttribute("points", pointsAttr);
-  polygon.setAttribute("class", "preview-polygon");
-  targetOverlay.appendChild(polygon);
-}
-
-function showPreviewHighlight(shape) {
-  currentHighlightShape = shape || null;
-  if (previewOverlayEl) previewOverlayEl.innerHTML = "";
-  if (processedPreviewOverlayEl) processedPreviewOverlayEl.innerHTML = "";
-  if (!shape) return;
-
-  const targetImage = previewMode === "processed" ? processedPreviewImageEl : previewImageEl;
-  const targetOverlay = previewMode === "processed" ? processedPreviewOverlayEl : previewOverlayEl;
-  const targetContainer = previewMode === "processed" ? processedPreviewEl : previewEl;
-  const pointsKey = previewMode === "processed" ? "processed_points" : "points";
-  const points = Array.isArray(shape?.[pointsKey]) ? shape[pointsKey] : null;
-
-  if (!targetImage || !targetOverlay || !targetContainer || !points || points.length === 0) {
-    return;
-  }
-
-  drawPolygonOnPreview(targetContainer, targetImage, targetOverlay, points);
+  renderImagePreview(processedPreviewEl, dataUrl, "预处理后预览");
+  syncProcessedPreviewCardVisibility();
 }
 
 function applyLowConfidenceStyle(el, confidence) {
@@ -270,13 +247,12 @@ function applyLowConfidenceStyle(el, confidence) {
   }
 }
 
-function makeEditableCell(text, field, confidence, box) {
+function makeEditableCell(text, field, confidence) {
   const span = document.createElement("span");
   span.className = "cell-editable";
   span.contentEditable = "true";
   span.dataset.field = field;
   span.dataset.confidence = String(confidence ?? 1);
-  if (box) span.dataset.box = JSON.stringify(box);
   span.textContent = text ?? "";
 
   span.addEventListener("input", () => {
@@ -290,7 +266,7 @@ function makeEditableCell(text, field, confidence, box) {
   return span;
 }
 
-function addRow(values = {}, confidences = {}, boxes = {}) {
+function addRow(values = {}, confidences = {}) {
   const tr = document.createElement("tr");
   tr.dataset.row = "1";
 
@@ -307,8 +283,7 @@ function addRow(values = {}, confidences = {}, boxes = {}) {
       makeEditableCell(
         String(values[header] ?? ""),
         header,
-        Number(confidences[header] ?? 1),
-        boxes[header] ?? null
+        Number(confidences[header] ?? 1)
       )
     );
     tr.appendChild(td);
@@ -361,17 +336,13 @@ function clearTable() {
   currentHeaders = [];
   currentTitle = "";
   currentMeta = {};
-  currentHeaderBoxes = {};
   currentProcessedPreview = "";
   if (resultTitleEl) resultTitleEl.textContent = "";
   if (resultMetaEl) resultMetaEl.innerHTML = "";
   if (processedPreviewEl) {
     processedPreviewEl.innerHTML = `<div class="preview-placeholder">等待识别</div>`;
   }
-  processedPreviewImageEl = null;
-  processedPreviewOverlayEl = null;
-  syncPreviewModeUI();
-  clearPreviewHighlight();
+  syncProcessedPreviewCardVisibility();
   refreshLowConfidenceSummary();
   updateRiskColumns({ preserveSelection: false });
 }
@@ -381,7 +352,6 @@ function renderTranscript(data) {
   const rows = Array.isArray(data.rows) ? data.rows : [];
   const title = typeof data.title === "string" ? data.title.trim() : "";
   const meta = data.meta && typeof data.meta === "object" ? data.meta : {};
-  const headerBoxes = data.header_boxes && typeof data.header_boxes === "object" ? data.header_boxes : {};
   const processedPreview = typeof data.processed_preview === "string" ? data.processed_preview : "";
 
   if (headers.length === 0) {
@@ -392,7 +362,6 @@ function renderTranscript(data) {
 
   currentHeaders = headers;
   currentTitle = title;
-  currentHeaderBoxes = headerBoxes;
 
   if (resultTitleEl) resultTitleEl.textContent = title || "";
   renderMeta(meta);
@@ -400,8 +369,7 @@ function renderTranscript(data) {
 
   let thHtml = `<th class="col-index" data-col="__index__">序号</th>`;
   for (const header of headers) {
-    const box = headerBoxes[header] ? ` data-box='${JSON.stringify(headerBoxes[header])}'` : "";
-    thHtml += `<th data-col="${header}"${box}>${header}</th>`;
+    thHtml += `<th data-col="${header}">${header}</th>`;
   }
   thHtml += `<th data-col="__action__">操作</th>`;
   thead.innerHTML = `<tr>${thHtml}</tr>`;
@@ -411,7 +379,7 @@ function renderTranscript(data) {
     tbody.innerHTML = `<tr class="empty"><td colspan="${headers.length + 2}">未识别到数据行</td></tr>`;
   } else {
     for (const row of rows) {
-      addRow(row.values || {}, row.confidences || {}, row.boxes || {});
+      addRow(row.values || {}, row.confidences || {});
     }
   }
 
@@ -457,16 +425,12 @@ function buildPayloadFromUI() {
     rows: rows.map((tr) => {
       const values = {};
       const confidences = {};
-      const boxes = {};
       tr.querySelectorAll(".cell-editable").forEach((span) => {
         const field = span.dataset.field;
         values[field] = span.textContent.trim();
         confidences[field] = Number(span.dataset.confidence ?? 1);
-        if (span.dataset.box) {
-          boxes[field] = JSON.parse(span.dataset.box);
-        }
       });
-      return { values, confidences, boxes };
+      return { values, confidences };
     }),
   };
 }
@@ -599,16 +563,6 @@ thresholdInput?.addEventListener("input", () => {
   updateRiskColumns({ preserveSelection: true });
 });
 
-previewModeSelect?.addEventListener("change", () => {
-  previewMode = previewModeSelect.value || "original";
-  syncPreviewModeUI();
-  if (currentHighlightShape) {
-    showPreviewHighlight(currentHighlightShape);
-  } else {
-    clearPreviewHighlight();
-  }
-});
-
 uploadBtn?.addEventListener("click", async () => {
   if (!selectedFile) return;
   uploadBtn.disabled = true;
@@ -636,7 +590,7 @@ addRowBtn?.addEventListener("click", () => {
     alert("请先上传文件并识别出表头结构后再添加行");
     return;
   }
-  addRow({}, {}, {});
+  addRow({}, {});
 });
 
 exportBtn?.addEventListener("click", async () => {
@@ -662,32 +616,10 @@ riskColumnSelect?.addEventListener("change", () => {
   applyColumnFilter();
 });
 
-tbody?.addEventListener("click", (event) => {
-  const target = event.target.closest(".cell-editable");
-  if (!target) return;
-  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
-});
-
-tbody?.addEventListener("focusin", (event) => {
-  const target = event.target.closest(".cell-editable");
-  if (!target) return;
-  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
-});
-
-thead?.addEventListener("click", (event) => {
-  const target = event.target.closest("th[data-box]");
-  if (!target) return;
-  showPreviewHighlight(target.dataset.box ? JSON.parse(target.dataset.box) : null);
-});
-
-window.addEventListener("resize", () => {
-  if (currentHighlightShape) {
-    showPreviewHighlight(currentHighlightShape);
-  }
-});
+bindImageLightbox();
 
 renderPreview(null);
 clearTable();
 setFileMeta(null);
 if (thresholdValueEl) thresholdValueEl.textContent = threshold.toFixed(2);
-syncPreviewModeUI();
+syncProcessedPreviewCardVisibility();
